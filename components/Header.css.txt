@@ -1,0 +1,23 @@
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1976d2;
+  color: white;
+  padding: 0.5rem 1rem;
+}
+.app-header .logo {
+  margin: 0;
+}
+.app-header nav a {
+  color: white;
+  margin-right: 1rem;
+  text-decoration: none;
+}
+.app-header .logout-btn {
+  background: transparent;
+  border: 1px solid white;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+}

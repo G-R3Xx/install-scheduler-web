@@ -1,0 +1,25 @@
+.createjob-container {
+  max-width: 600px;
+  margin: 2rem auto;
+  padding: 1rem;
+  background: #fafafa;
+  border-radius: 4px;
+}
+.createjob-container form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.createjob-container label {
+  display: flex;
+  flex-direction: column;
+  font-weight: bold;
+}
+.createjob-container input,
+.createjob-container textarea {
+  padding: 0.5rem;
+  font-size: 1rem;
+}
+.createjob-container .error {
+  color: red;
+}
