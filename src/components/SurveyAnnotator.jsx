@@ -1,3 +1,4 @@
+// src/components/SurveyAnnotator.jsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Box, Button, ToggleButton, ToggleButtonGroup, TextField } from '@mui/material';
 import {
@@ -6,7 +7,7 @@ import {
   Image as KImage,
   Rect,
   Arrow,
-  Text,
+  Text as KText,   // alias to avoid collisions
   Transformer,
   Group,
   Label,
@@ -15,7 +16,7 @@ import {
 } from 'react-konva';
 import { v4 as uuid } from 'uuid';
 
-// Load image as HTMLImageElement
+// Load image as HTMLImageElement with "loaded" flag
 function useLoadedImage(fileOrUrl) {
   const objectUrl = useMemo(() => {
     if (!fileOrUrl) return null;
@@ -51,7 +52,6 @@ function useLoadedImage(fileOrUrl) {
   return { img, loaded };
 }
 
-// midpoint between arrow endpoints
 const midPoint = (pts) => ({ x: (pts[0] + pts[2]) / 2, y: (pts[1] + pts[3]) / 2 });
 
 export default function SurveyAnnotator({ file, tools = [], onSave }) {
@@ -66,7 +66,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [fontSize, setFontSize] = useState(18);
 
-  // shapes: { id, type: 'rect'|'text'|'arrow', ... , measure?: number }
+  // shapes: { id, type: 'rect'|'text'|'arrow', ... , measure?: number, text?: string }
   const [shapes, setShapes] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
 
@@ -74,7 +74,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const [startPt, setStartPt] = useState(null);
   const [stageSize, setStageSize] = useState({ w: 900, h: 600 });
 
-  // recompute size when image loads
+  // Resize stage to container when image loads
   useEffect(() => {
     if (!imgLoaded || !bgImage || !containerRef.current) return;
     const maxW = containerRef.current.clientWidth || 1000;
@@ -85,13 +85,13 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     });
   }, [imgLoaded, bgImage]);
 
-  // clear shapes when new file selected
+  // Clear shapes when a new file is chosen
   useEffect(() => {
     setShapes([]);
     setSelectedId(null);
   }, [file]);
 
-  // delete key
+  // Delete key for selected
   useEffect(() => {
     const onKey = (e) => {
       if (!selectedId) return;
@@ -104,7 +104,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId]);
 
-  // transformer only for rect/text
+  // Transformer only for rect/text (arrows use anchors)
   useEffect(() => {
     const tr = trRef.current;
     const stage = stageRef.current;
@@ -120,6 +120,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     tr.getLayer()?.batchDraw();
   }, [selectedId, shapes]);
 
+  // Start a new shape based on current tool
   const startShape = useCallback(
     (pos) => {
       const id = uuid();
@@ -144,19 +145,29 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           color,
           strokeWidth,
           draggable: true,
+          text: '',      // text box content
+          fontSize,      // text size for box label
         };
       }
       return null;
     },
-    [tool, color, strokeWidth]
+    [tool, color, strokeWidth, fontSize]
   );
 
-  // ---------- Mouse handlers ----------
+  // Helper: prompt to set/edit text for a rectangle
+  const promptRectText = (shape) => {
+    const current = shape.text || '';
+    const label = window.prompt('Enter text for this box:', current);
+    if (label === null) return; // cancelled
+    setShapes((arr) => arr.map((s) => (s.id === shape.id ? { ...s, text: label } : s)));
+  };
+
+  // ------- Mouse handlers -------
   const handleMouseDown = (e) => {
     const stage = e.target.getStage();
     const clickedOnEmpty = e.target === stage;
 
-    // select shape if clicked
+    // Click on shape: select it (do not start a new one)
     if (!clickedOnEmpty) {
       const id = e.target.id?.();
       if (id) setSelectedId(id);
@@ -167,7 +178,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     const pos = stage.getPointerPosition();
 
     if (tool === 'text') {
-      const label = prompt('Enter text:');
+      const label = window.prompt('Enter text:');
       if (!label) return;
       const id = uuid();
       setShapes((s) => [
@@ -206,11 +217,23 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   };
 
   const handleMouseUp = () => {
+    // If we've just drawn a rect, prompt to add text immediately
+    if (isDrawing && tool === 'rect') {
+      setShapes((arr) =>
+        arr.map((s) => {
+          if (s.id !== selectedId || s.type !== 'rect') return s;
+          if (Math.abs(s.width) < 2 && Math.abs(s.height) < 2) return s;
+          const current = s.text || '';
+          const label = window.prompt('Enter text for this box:', current);
+          return { ...s, text: label ?? current };
+        })
+      );
+    }
     setIsDrawing(false);
     setStartPt(null);
   };
 
-  // ---------- Helpers ----------
+  // ------- Helpers -------
   const updateSelected = (patch) => {
     setShapes((arr) => arr.map((s) => (s.id === selectedId ? { ...s, ...patch } : s)));
   };
@@ -258,11 +281,9 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           if (sh.id !== s.id) return sh;
           const pts = [...sh.points];
           if (which === 'start') {
-            pts[0] = nx;
-            pts[1] = ny;
+            pts[0] = nx; pts[1] = ny;
           } else {
-            pts[2] = nx;
-            pts[3] = ny;
+            pts[2] = nx; pts[3] = ny;
           }
           return { ...sh, points: pts };
         })
@@ -290,31 +311,24 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           x={mid.x}
           y={mid.y}
           onClick={() => {
-            const v = prompt(
-              'Enter measurement (mm):',
-              s.measure != null ? String(s.measure) : ''
-            );
+            const v = window.prompt('Enter measurement (mm):', s.measure != null ? String(s.measure) : '');
             if (v == null) return;
             const n = Number(v);
             setShapes((arr) =>
-              arr.map((sh) =>
-                sh.id === s.id
-                  ? { ...sh, measure: Number.isFinite(n) ? n : null }
-                  : sh
-              )
+              arr.map((sh) => (sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh))
             );
           }}
         >
           {(selectedId === s.id || s.measure == null) && (
             <Label offsetX={14} offsetY={14}>
               <Tag fill="rgba(0,0,0,0.55)" stroke="#fff" cornerRadius={14} />
-              <Text text="?" fontSize={14} fill="#fff" padding={6} />
+              <KText text="?" fontSize={14} fill="#fff" padding={6} />
             </Label>
           )}
         </Group>
 
         {s.measure != null && (
-          <Text
+          <KText
             text={`${s.measure} mm`}
             x={mid.x}
             y={mid.y - (fontSize + 6)}
@@ -328,22 +342,8 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         {/* End anchors */}
         {selectedId === s.id && (
           <>
-            <Anchor
-              x={x1}
-              y={y1}
-              onDragMove={(e) => {
-                const p = e.target.position();
-                setEnd('start', p.x, p.y);
-              }}
-            />
-            <Anchor
-              x={x2}
-              y={y2}
-              onDragMove={(e) => {
-                const p = e.target.position();
-                setEnd('end', p.x, p.y);
-              }}
-            />
+            <Anchor x={x1} y={y1} onDragMove={(e) => { const p = e.target.position(); setEnd('start', p.x, p.y); }} />
+            <Anchor x={x2} y={y2} onDragMove={(e) => { const p = e.target.position(); setEnd('end', p.x, p.y); }} />
           </>
         )}
       </>
@@ -354,9 +354,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     const stage = stageRef.current;
     if (!stage) return;
     const stageJSON = stage.toJSON();
-    const blob = await new Promise((res) =>
-      stage.toCanvas().toBlob(res, 'image/png')
-    );
+    const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
     onSave?.({ stageJSON: JSON.parse(stageJSON), annotatedBlob: blob });
     alert('Annotation saved for this sign.');
   };
@@ -364,20 +362,10 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const selectedShape = shapes.find((s) => s.id === selectedId);
 
   return (
-    <Box
-      ref={containerRef}
-      sx={{ border: '1px solid #555', borderRadius: 1, p: 1, display: 'grid', gap: 8 }}
-    >
+    <Box ref={containerRef} sx={{ border: '1px solid #555', borderRadius: 1, p: 1, display: 'grid', gap: 8 }}>
       {/* Toolbar */}
-      <Box
-        sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}
-      >
-        <ToggleButtonGroup
-          size="small"
-          exclusive
-          value={tool}
-          onChange={(_, v) => v && setTool(v)}
-        >
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <ToggleButtonGroup size="small" exclusive value={tool} onChange={(_, v) => v && setTool(v)}>
           {tools.includes('text') && <ToggleButton value="text">Text</ToggleButton>}
           {tools.includes('rect') && <ToggleButton value="rect">Rect</ToggleButton>}
           {tools.includes('arrow') && <ToggleButton value="arrow">↔︎ Arrow</ToggleButton>}
@@ -389,13 +377,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            style={{
-              width: 32,
-              height: 24,
-              padding: 0,
-              border: 'none',
-              background: 'transparent',
-            }}
+            style={{ width: 32, height: 24, padding: 0, border: 'none', background: 'transparent' }}
           />
         </label>
         <TextField
@@ -403,9 +385,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           type="number"
           size="small"
           value={strokeWidth}
-          onChange={(e) =>
-            setStrokeWidth(Math.max(1, Number(e.target.value) || 1))
-          }
+          onChange={(e) => setStrokeWidth(Math.max(1, Number(e.target.value) || 1))}
           inputProps={{ min: 1, style: { width: 60 } }}
         />
         {tool === 'text' && (
@@ -414,23 +394,17 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             type="number"
             size="small"
             value={fontSize}
-            onChange={(e) =>
-              setFontSize(Math.max(8, Number(e.target.value) || 12))
-            }
+            onChange={(e) => setFontSize(Math.max(8, Number(e.target.value) || 12))}
             inputProps={{ min: 8, style: { width: 70 } }}
           />
         )}
 
-        <Button size="small" variant="outlined" onClick={save}>
-          Save Annotation
-        </Button>
+        <Button size="small" variant="outlined" onClick={save}>Save Annotation</Button>
       </Box>
 
-      {/* Selected-shape property panel */}
+      {/* Selected shape property panel */}
       {selectedShape && (
-        <Box
-          sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}
-        >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <strong>Selected:</strong> {selectedShape.type}
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             Color:
@@ -438,43 +412,43 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
               type="color"
               value={selectedShape.color || '#ff0000'}
               onChange={(e) => updateSelected({ color: e.target.value })}
-              style={{
-                width: 32,
-                height: 24,
-                padding: 0,
-                border: 'none',
-                background: 'transparent',
-              }}
+              style={{ width: 32, height: 24, padding: 0, border: 'none', background: 'transparent' }}
             />
           </label>
+
           {selectedShape.type !== 'text' && (
             <TextField
               label="Stroke"
               type="number"
               size="small"
               value={selectedShape.strokeWidth ?? 2}
-              onChange={(e) =>
-                updateSelected({
-                  strokeWidth: Math.max(1, Number(e.target.value) || 1),
-                })
-              }
+              onChange={(e) => updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })}
               inputProps={{ min: 1, style: { width: 60 } }}
             />
           )}
+
           {selectedShape.type === 'text' && (
             <TextField
               label="Font"
               type="number"
               size="small"
               value={selectedShape.fontSize ?? 18}
-              onChange={(e) =>
-                updateSelected({
-                  fontSize: Math.max(8, Number(e.target.value) || 12),
-                })
-              }
+              onChange={(e) => updateSelected({ fontSize: Math.max(8, Number(e.target.value) || 12) })}
               inputProps={{ min: 8, style: { width: 70 } }}
             />
           )}
+
+          {/* Rect text editing field */}
+          {selectedShape.type === 'rect' && (
+            <TextField
+              label="Box Text"
+              size="small"
+              value={selectedShape.text || ''}
+              onChange={(e) => updateSelected({ text: e.target.value })}
+              inputProps={{ style: { width: 240 } }}
+            />
+          )}
+
           <Button
             size="small"
             color="error"
@@ -489,7 +463,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         </Box>
       )}
 
-      {/* Canvas */}
+      {/* Canvas area */}
       {!imgLoaded && (
         <Box
           sx={{
@@ -519,39 +493,60 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           style={{ maxWidth: '100%' }}
         >
           <Layer>
-            {/* Background photo */}
-            <KImage
-              image={bgImage}
-              width={stageSize.w}
-              height={stageSize.h}
-              listening={false}
-            />
+            {/* Background image */}
+            <KImage image={bgImage} width={stageSize.w} height={stageSize.h} listening={false} />
 
             {shapes.map((s) => {
               if (s.type === 'rect') {
+                // Handle negative width/height by normalizing for centered text
+                const rx = s.width >= 0 ? s.x : s.x + s.width;
+                const ry = s.height >= 0 ? s.y : s.y + s.height;
+                const rw = Math.abs(s.width);
+                const rh = Math.abs(s.height);
                 return (
-                  <Rect
-                    id={s.id}
-                    key={s.id}
-                    x={s.x}
-                    y={s.y}
-                    width={s.width}
-                    height={s.height}
-                    draggable
-                    stroke={s.color}
-                    strokeWidth={s.strokeWidth}
-                    onClick={() => setSelectedId(s.id)}
-                    onTap={() => setSelectedId(s.id)}
-                    onDragEnd={(e) =>
-                      updateSelected({ x: e.target.x(), y: e.target.y() })
-                    }
-                    onTransformEnd={(e) => onTransformEnd(e, s)}
-                  />
+                  <React.Fragment key={s.id}>
+                    <Rect
+                      id={s.id}
+                      x={rx}
+                      y={ry}
+                      width={rw}
+                      height={rh}
+                      draggable
+                      stroke={s.color}
+                      strokeWidth={s.strokeWidth}
+                      onClick={() => {
+                        setSelectedId(s.id);
+                        if (!s.text) promptRectText(s); // single-click empty -> prompt
+                      }}
+                      onDblClick={() => promptRectText(s)} // double-click to edit
+                      onTap={() => {
+                        setSelectedId(s.id);
+                        if (!s.text) promptRectText(s);
+                      }}
+                      onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
+                      onTransformEnd={(e) => onTransformEnd(e, s)}
+                    />
+                    {s.text && (
+                      <KText
+                        text={s.text}
+                        x={rx + rw / 2}
+                        y={ry + rh / 2}
+                        offsetX={(s.text.length * (s.fontSize || fontSize)) / 4}
+                        offsetY={(s.fontSize || fontSize) / 2}
+                        fontSize={s.fontSize || fontSize}
+                        fill={s.color}
+                        onClick={() => setSelectedId(s.id)}
+                        onDblClick={() => promptRectText(s)}
+                        listening
+                      />
+                    )}
+                  </React.Fragment>
                 );
               }
+
               if (s.type === 'text') {
                 return (
-                  <Text
+                  <KText
                     id={s.id}
                     key={s.id}
                     x={s.x}
@@ -562,13 +557,12 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                     draggable
                     onClick={() => setSelectedId(s.id)}
                     onTap={() => setSelectedId(s.id)}
-                    onDragEnd={(e) =>
-                      updateSelected({ x: e.target.x(), y: e.target.y() })
-                    }
+                    onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                     onTransformEnd={(e) => onTransformEnd(e, s)}
                   />
                 );
               }
+
               if (s.type === 'arrow') {
                 return <React.Fragment key={s.id}>{renderArrowWithAnchors(s)}</React.Fragment>;
               }
