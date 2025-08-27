@@ -4,6 +4,52 @@ import { Box, Button, Divider, TextField, Typography } from '@mui/material';
 import { v4 as uuid } from 'uuid';
 import SurveyAnnotator from '../components/SurveyAnnotator';
 
+/**
+ * Create a downscaled JPEG preview for faster annotation.
+ * Keeps the original file untouched (you can upload/store that later).
+ */
+async function makePreviewImage(file, { maxDim = 2048, quality = 0.8 } = {}) {
+  // Read file to dataURL
+  const dataURL = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+
+  // Load into an Image element
+  const img = await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = dataURL;
+  });
+
+  // Compute target size
+  const { width, height } = img;
+  const scale = Math.min(1, maxDim / Math.max(width, height));
+  const targetW = Math.round(width * scale);
+  const targetH = Math.round(height * scale);
+
+  // Draw to canvas at reduced size
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+
+  // Export to JPEG blob
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+
+  return {
+    blob,
+    url: URL.createObjectURL(blob), // for <img>/Konva.Image
+    width: targetW,
+    height: targetH,
+    original: { width, height },
+  };
+}
+
 export default function SiteSurveyPage() {
   const [client, setClient] = useState({
     name: '', contact: '', phone: '', email: '', address: ''
@@ -14,7 +60,11 @@ export default function SiteSurveyPage() {
       id: uuid(),
       name: 'Sign 1',
       description: '',
-      file: null,
+      // Keep both original and preview:
+      fileOriginal: null,     // the untouched File
+      previewUrl: null,       // downscaled JPEG (for annotator)
+      previewBlob: null,      // (optional) upload as thumbnail later
+      // Annotation outputs:
       stageJSON: null,
       annotatedBlob: null
     }
@@ -23,12 +73,53 @@ export default function SiteSurveyPage() {
   const addSign = () =>
     setSigns(s => [
       ...s,
-      { id: uuid(), name: `Sign ${s.length + 1}`, description: '', file: null, stageJSON: null, annotatedBlob: null }
+      {
+        id: uuid(),
+        name: `Sign ${s.length + 1}`,
+        description: '',
+        fileOriginal: null,
+        previewUrl: null,
+        previewBlob: null,
+        stageJSON: null,
+        annotatedBlob: null
+      }
     ]);
 
-  const onFile = (idx, file) => {
+  // Handle file select: store original + build preview
+  const onFile = async (idx, file) => {
     const next = [...signs];
-    next[idx].file = file;
+
+    if (!file) {
+      // clear image + annotations if user removed file
+      next[idx].fileOriginal = null;
+      if (next[idx].previewUrl) URL.revokeObjectURL(next[idx].previewUrl);
+      next[idx].previewUrl = null;
+      next[idx].previewBlob = null;
+      next[idx].stageJSON = null;
+      next[idx].annotatedBlob = null;
+      setSigns(next);
+      return;
+    }
+
+    next[idx].fileOriginal = file;
+
+    try {
+      const preview = await makePreviewImage(file, { maxDim: 2048, quality: 0.8 });
+      // revoke previous preview URL to avoid leaks
+      if (next[idx].previewUrl) URL.revokeObjectURL(next[idx].previewUrl);
+      next[idx].previewUrl = preview.url;
+      next[idx].previewBlob = preview.blob;
+      // clear any prior annotations when a new image is chosen
+      next[idx].stageJSON = null;
+      next[idx].annotatedBlob = null;
+    } catch (err) {
+      console.error('Preview generation failed', err);
+      // fall back to using the original directly
+      if (next[idx].previewUrl) URL.revokeObjectURL(next[idx].previewUrl);
+      next[idx].previewUrl = URL.createObjectURL(file);
+      next[idx].previewBlob = null;
+    }
+
     setSigns(next);
   };
 
@@ -44,7 +135,8 @@ export default function SiteSurveyPage() {
     console.log('Signs:', signs.map(s => ({
       id: s.id,
       name: s.name,
-      hasOriginal: !!s.file,
+      hasOriginal: !!s.fileOriginal,
+      hasPreview: !!s.previewUrl,
       hasAnnotation: !!s.annotatedBlob
     })));
     alert('Survey captured (local only). Next step: wire Firebase save + email.');
@@ -76,12 +168,19 @@ export default function SiteSurveyPage() {
             }}
             fullWidth
           />
-          <input type="file" accept="image/*" onChange={e => onFile(i, e.target.files?.[0] || null)} />
+          <input
+            type="file"
+            accept="image/*"
+            onChange={async e => {
+              const file = e.target.files?.[0] || null;
+              await onFile(i, file);
+            }}
+          />
 
-          {s.file && (
+          {s.previewUrl && (
             <SurveyAnnotator
-              file={s.file}
-              tools={['text', 'line', 'arrow', 'rect', 'circle']}
+              file={s.previewUrl}                 // use the downscaled preview for fast annotating
+              tools={['text', 'rect', 'arrow']}   // only the tools you want
               onSave={(payload) => onAnnotSave(i, payload)}
             />
           )}
