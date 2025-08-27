@@ -1,22 +1,48 @@
 // src/components/SurveyAnnotator.jsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Box, Button, ToggleButton, ToggleButtonGroup, TextField } from '@mui/material';
 import {
-  Stage,
-  Layer,
-  Image as KImage,
-  Rect,
-  Arrow,
-  Text as KText,   // alias to avoid collisions
-  Transformer,
-  Group,
-  Label,
-  Tag,
-  Circle,
+  Box,
+  Button,
+  ToggleButton,
+  ToggleButtonGroup,
+  TextField,
+  IconButton,
+  Paper,
+} from '@mui/material';
+import CloseIcon from '@mui/icons-material/Close';
+import {
+  Stage, Layer, Image as KImage, Rect, Arrow, Text as KText,
+  Transformer, Group, Label, Tag, Circle,
 } from 'react-konva';
 import { v4 as uuid } from 'uuid';
 
-// Load image as HTMLImageElement with "loaded" flag
+/** Convert raw clientX/clientY to stage coordinates (robust to CSS scaling). */
+function clientToStagePos(stage, evt) {
+  const rect = stage.container().getBoundingClientRect();
+  const scaleX = stage.width() / rect.width;
+  const scaleY = stage.height() / rect.height;
+  return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+}
+
+/** Observe container size for responsive canvas */
+function useResizeObserverSize(ref) {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    if (!ref.current) return;
+    const el = ref.current;
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const cr = e.contentRect;
+        setSize({ width: cr.width, height: cr.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
+}
+
+/** Load an image object from a File or URL */
 function useLoadedImage(fileOrUrl) {
   const objectUrl = useMemo(() => {
     if (!fileOrUrl) return null;
@@ -28,22 +54,13 @@ function useLoadedImage(fileOrUrl) {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    setImg(null);
-    setLoaded(false);
+    setImg(null); setLoaded(false);
     if (!objectUrl) return;
-
     const image = new window.Image();
     image.crossOrigin = 'anonymous';
-    image.onload = () => {
-      setImg(image);
-      setLoaded(true);
-    };
-    image.onerror = () => {
-      setImg(null);
-      setLoaded(false);
-    };
+    image.onload = () => { setImg(image); setLoaded(true); };
+    image.onerror = () => { setImg(null); setLoaded(false); };
     image.src = objectUrl;
-
     return () => {
       if (fileOrUrl && typeof fileOrUrl !== 'string') URL.revokeObjectURL(objectUrl);
     };
@@ -60,10 +77,12 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const containerRef = useRef(null);
 
   const { img: bgImage, loaded: imgLoaded } = useLoadedImage(file);
+  const containerSize = useResizeObserverSize(containerRef);
+  const isSmallScreen = typeof window !== 'undefined' ? window.innerWidth <= 600 : false;
 
-  // Default tool → 'arrow'
-  const [tool, setTool] = useState('arrow');
-  const [color, setColor] = useState('#ff0000');
+  // Defaults
+  const [tool, setTool] = useState('arrow'); // arrow by default
+  const [color, setColor] = useState('#ff4d4d');
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [fontSize, setFontSize] = useState(18);
 
@@ -75,22 +94,23 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const [startPt, setStartPt] = useState(null);
   const [stageSize, setStageSize] = useState({ w: 900, h: 600 });
 
-  // Resize stage to container when image loads
+  // Properties popup visibility
+  const [propsOpen, setPropsOpen] = useState(false);
+  useEffect(() => { setPropsOpen(!!selectedId); }, [selectedId]);
+
+  // Responsive: fit image to container width, preserve aspect
   useEffect(() => {
-    if (!imgLoaded || !bgImage || !containerRef.current) return;
-    const maxW = containerRef.current.clientWidth || 1000;
+    if (!imgLoaded || !bgImage || !containerSize.width) return;
+    const maxW = containerSize.width;
     const scale = Math.min(1, maxW / bgImage.width);
     setStageSize({
       w: Math.round(bgImage.width * scale),
       h: Math.round(bgImage.height * scale),
     });
-  }, [imgLoaded, bgImage]);
+  }, [imgLoaded, bgImage, containerSize.width]);
 
   // Clear shapes when a new file is chosen
-  useEffect(() => {
-    setShapes([]);
-    setSelectedId(null);
-  }, [file]);
+  useEffect(() => { setShapes([]); setSelectedId(null); }, [file]);
 
   // Delete key for selected
   useEffect(() => {
@@ -105,99 +125,55 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId]);
 
-  // Transformer only for rect/text (arrows use anchors)
+  // Transformer only for rect/text (arrows use custom anchors)
   useEffect(() => {
-    const tr = trRef.current;
-    const stage = stageRef.current;
+    const tr = trRef.current, stage = stageRef.current;
     if (!tr || !stage) return;
     const sel = shapes.find((x) => x.id === selectedId);
-    if (!sel || sel.type === 'arrow') {
-      tr.nodes([]);
-      tr.getLayer()?.batchDraw();
-      return;
-    }
+    if (!sel || sel.type === 'arrow') { tr.nodes([]); tr.getLayer()?.batchDraw(); return; }
     const node = stage.findOne(`#${selectedId}`);
-    tr.nodes(node ? [node] : []);
-    tr.getLayer()?.batchDraw();
+    tr.nodes(node ? [node] : []); tr.getLayer()?.batchDraw();
   }, [selectedId, shapes]);
 
-  // Start a new shape based on current tool
-  const startShape = useCallback(
-    (pos) => {
-      const id = uuid();
-      if (tool === 'arrow') {
-        return {
-          id,
-          type: 'arrow',
-          points: [pos.x, pos.y, pos.x, pos.y],
-          color,
-          strokeWidth,
-          measure: null,
-        };
-      }
-      if (tool === 'rect') {
-        return {
-          id,
-          type: 'rect',
-          x: pos.x,
-          y: pos.y,
-          width: 0,
-          height: 0,
-          color,
-          strokeWidth,
-          draggable: true,
-          text: '',      // text box content
-          fontSize,      // text size for box label
-        };
-      }
-      if (tool === 'text') {
-        return {
-          id,
-          type: 'text',
-          x: pos.x,
-          y: pos.y,
-          text: '',
-          color,
-          fontSize,
-          draggable: true,
-        };
-      }
-      return null;
-    },
-    [tool, color, strokeWidth, fontSize]
-  );
+  // Start new shape for current tool
+  const startShape = useCallback((pos) => {
+    const id = uuid();
+    if (tool === 'arrow') {
+      return { id, type: 'arrow', points: [pos.x, pos.y, pos.x, pos.y], color, strokeWidth, measure: null };
+    }
+    if (tool === 'rect') {
+      return {
+        id, type: 'rect',
+        x: pos.x, y: pos.y, width: 0, height: 0,
+        color, strokeWidth, draggable: true,
+        text: '', fontSize, textColor: '#ffffff', // default white text inside rectangle
+      };
+    }
+    if (tool === 'text') {
+      return { id, type: 'text', x: pos.x, y: pos.y, text: '', color, fontSize, draggable: true };
+    }
+    return null;
+  }, [tool, color, strokeWidth, fontSize]);
 
-  // Helper: prompt to set/edit text for a rectangle
-  const promptRectText = (shape) => {
-    const current = shape.text || '';
-    const label = window.prompt('Enter text for this box:', current);
-    if (label === null) return; // cancelled
-    setShapes((arr) => arr.map((s) => (s.id === shape.id ? { ...s, text: label } : s)));
-  };
-
-  // ------- Mouse handlers -------
-  const handleMouseDown = (e) => {
+  // Pointer handlers (mouse & touch)
+  const handlePointerDown = (e) => {
     const stage = e.target.getStage();
     const clickedOnEmpty = e.target === stage;
 
-    // Click on shape: select it (do not start a new one)
     if (!clickedOnEmpty) {
       const id = e.target.id?.();
       if (id) setSelectedId(id);
       return;
     }
-
     if (!bgImage) return;
+
     const pos = stage.getPointerPosition();
 
     if (tool === 'text') {
       const label = window.prompt('Enter text:');
       if (!label) return;
       const id = uuid();
-      setShapes((s) => [
-        ...s,
-        { id, type: 'text', x: pos.x, y: pos.y, text: label, fontSize, color, draggable: true },
-      ]);
+      setShapes((s) => [...s, { id, type: 'text', x: pos.x, y: pos.y, text: label, fontSize, color, draggable: true }]);
       setSelectedId(id);
       return;
     }
@@ -205,135 +181,96 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     setIsDrawing(true);
     setStartPt(pos);
     const newShape = startShape(pos);
-    if (newShape) {
-      setShapes((s) => [...s, newShape]);
-      setSelectedId(newShape.id);
-    }
+    if (newShape) { setShapes((s) => [...s, newShape]); setSelectedId(newShape.id); }
   };
 
-  const handleMouseMove = (e) => {
+  const handlePointerMove = (e) => {
     if (!isDrawing || !startPt) return;
     const pos = e.target.getStage().getPointerPosition();
     setShapes((prev) => {
       const next = [...prev];
       const curr = next[next.length - 1];
       if (!curr) return next;
-
-      if (curr.type === 'arrow') {
-        curr.points = [startPt.x, startPt.y, pos.x, pos.y];
-      } else if (curr.type === 'rect') {
-        curr.width = pos.x - startPt.x;
-        curr.height = pos.y - startPt.y;
-      }
+      if (curr.type === 'arrow') curr.points = [startPt.x, startPt.y, pos.x, pos.y];
+      else if (curr.type === 'rect') { curr.width = pos.x - startPt.x; curr.height = pos.y - startPt.y; }
       return next;
     });
   };
 
-  const handleMouseUp = () => {
-    // If we've just drawn a rect, prompt to add text immediately
-    if (isDrawing && tool === 'rect') {
-      setShapes((arr) =>
-        arr.map((s) => {
-          if (s.id !== selectedId || s.type !== 'rect') return s;
-          if (Math.abs(s.width) < 2 && Math.abs(s.height) < 2) return s;
-          const current = s.text || '';
-          const label = window.prompt('Enter text for this box:', current);
-          return { ...s, text: label ?? current };
-        })
-      );
-    }
-    setIsDrawing(false);
-    setStartPt(null);
+  const handlePointerUp = () => {
+    setIsDrawing(false); setStartPt(null);
   };
 
-  // ------- Helpers -------
+  // Update selected helper
   const updateSelected = (patch) => {
     setShapes((arr) => arr.map((s) => (s.id === selectedId ? { ...s, ...patch } : s)));
   };
 
   const onTransformEnd = (e, shape) => {
-    const node = e.target;
-    const scaleX = node.scaleX();
-    const scaleY = node.scaleY();
+    const node = e.target, scaleX = node.scaleX(), scaleY = node.scaleY();
     if (shape.type === 'rect') {
       const newAttrs = {
-        x: node.x(),
-        y: node.y(),
+        x: node.x(), y: node.y(),
         width: Math.max(1, node.width() * scaleX),
         height: Math.max(1, node.height() * scaleY),
       };
-      node.scaleX(1);
-      node.scaleY(1);
+      node.scaleX(1); node.scaleY(1);
       updateSelected(newAttrs);
     } else if (shape.type === 'text') {
       updateSelected({ x: node.x(), y: node.y() });
     }
   };
 
-  // --- Endpoint anchors for ARROW ---
+  // ---- Arrow anchors (true stage coords) ----
   const Anchor = ({ x, y, onDragMove, onMouseDown }) => (
-  <Circle
-    x={x}
-    y={y}
-    radius={10}                 // nice big hit area
-    fill="#00b7ff"
-    stroke="white"
-    strokeWidth={1}
-    draggable
-    onMouseDown={(e) => { e.cancelBubble = true; onMouseDown?.(e); }}
-    onDragMove={(e) => {
-      e.cancelBubble = true;
-      const stage = e.target.getStage();
-      const pos = stage.getPointerPosition();   // <-- always accurate
-      // keep the handle exactly under the cursor
-      e.target.position(pos);
-      // notify parent with true stage coords
-      onDragMove({ x: pos.x, y: pos.y });
-    }}
-    onDragStart={(e) => { e.cancelBubble = true; }}
-    onDragEnd={(e) => { e.cancelBubble = true; }}
-  />
-);
-
+    <Circle
+      x={x} y={y} radius={isSmallScreen ? 14 : 10}
+      fill="#00b7ff" stroke="white" strokeWidth={1} draggable
+      onMouseDown={(e) => { e.cancelBubble = true; onMouseDown?.(e); }}
+      onDragMove={(e) => {
+        e.cancelBubble = true;
+        const stage = e.target.getStage();
+        const pos = clientToStagePos(stage, e.evt);
+        e.target.position(pos);
+        onDragMove({ x: pos.x, y: pos.y });
+      }}
+      onDragStart={(e) => { e.cancelBubble = true; }}
+      onDragEnd={(e) => { e.cancelBubble = true; }}
+    />
+  );
 
   const renderArrowWithAnchors = (s) => {
     const [x1, y1, x2, y2] = s.points;
     const mid = midPoint(s.points);
 
     const setEnd = (which, nx, ny) => {
-      setShapes((arr) =>
-        arr.map((sh) => {
-          if (sh.id !== s.id) return sh;
-          const pts = [...sh.points];
-          if (which === 'start') {
-            pts[0] = nx; pts[1] = ny;
-          } else {
-            pts[2] = nx; pts[3] = ny;
-          }
-          return { ...sh, points: pts };
-        })
-      );
+      setShapes((arr) => arr.map((sh) => {
+        if (sh.id !== s.id) return sh;
+        const pts = [...sh.points];
+        if (which === 'start') { pts[0] = nx; pts[1] = ny; }
+        else { pts[2] = nx; pts[3] = ny; }
+        return { ...sh, points: pts };
+      }));
     };
 
     return (
       <>
         <Arrow
           id={s.id}
-          key={s.id}
           points={s.points}
           stroke={s.color}
           fill={s.color}
           strokeWidth={s.strokeWidth}
-          pointerLength={12}
-          pointerWidth={12}
+          pointerLength={isSmallScreen ? 16 : 12}
+          pointerWidth={isSmallScreen ? 16 : 12}
           pointerAtBeginning
-          hitStrokeWidth={20}                 // easier to select
+          hitStrokeWidth={isSmallScreen ? 30 : 20}
           onMouseDown={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
           onClick={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
           onTap={() => setSelectedId(s.id)}
         />
 
-        {/* Center measurement bubble */}
+        {/* Measurement bubble */}
         <Group
           x={mid.x}
           y={mid.y}
@@ -343,9 +280,9 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             const v = window.prompt('Enter measurement (mm):', s.measure != null ? String(s.measure) : '');
             if (v == null) return;
             const n = Number(v);
-            setShapes((arr) =>
-              arr.map((sh) => (sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh))
-            );
+            setShapes((arr) => arr.map((sh) => (
+              sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh
+            )));
           }}
         >
           {(selectedId === s.id || s.measure == null) && (
@@ -368,21 +305,11 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           />
         )}
 
-        {/* End anchors */}
+        {/* End anchors (only when selected) */}
         {selectedId === s.id && (
           <>
-            <Anchor
-  x={x1}
-  y={y1}
-  onMouseDown={() => setSelectedId(s.id)}
-  onDragMove={({ x, y }) => setEnd('start', x, y)}
-/>
-<Anchor
-  x={x2}
-  y={y2}
-  onMouseDown={() => setSelectedId(s.id)}
-  onDragMove={({ x, y }) => setEnd('end', x, y)}
-/>
+            <Anchor x={x1} y={y1} onMouseDown={() => setSelectedId(s.id)} onDragMove={({ x, y }) => setEnd('start', x, y)} />
+            <Anchor x={x2} y={y2} onMouseDown={() => setSelectedId(s.id)} onDragMove={({ x, y }) => setEnd('end', x, y)} />
           </>
         )}
       </>
@@ -401,32 +328,65 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const selectedShape = shapes.find((s) => s.id === selectedId);
 
   return (
-    <Box ref={containerRef} sx={{ border: '1px solid #555', borderRadius: 1, p: 1, display: 'grid', gap: 8 }}>
-      {/* Toolbar */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <ToggleButtonGroup size="small" exclusive value={tool} onChange={(_, v) => v && setTool(v)}>
-          {tools.includes('text') && <ToggleButton value="text">Text</ToggleButton>}
-          {tools.includes('rect') && <ToggleButton value="rect">Rect</ToggleButton>}
-          {tools.includes('arrow') && <ToggleButton value="arrow">↔︎ Arrow</ToggleButton>}
+    <Box
+      ref={containerRef}
+      sx={{
+        position: 'relative',
+        border: '1px solid rgba(0,0,0,0.12)',
+        borderRadius: 6,
+        p: 1,
+        display: 'grid',
+        gap: 8,
+        backgroundColor: 'rgba(245, 245, 245, 0.95)',   // LIGHT card background
+        color: '#111',                                   // dark text inside the card
+      }}
+    >
+      {/* Light toolbar */}
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexWrap: 'wrap',
+          p: 0.75,
+          border: '1px solid rgba(0,0,0,0.12)',
+          borderRadius: 4,
+          backgroundColor: 'rgba(255,255,255,0.9)',     // light toolbar
+          color: '#111',
+        }}
+      >
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={tool}
+          onChange={(_, v) => v && setTool(v)}
+          color="primary"
+        >
+          {tools.includes('text') && <ToggleButton value="text">TEXT</ToggleButton>}
+          {tools.includes('rect') && <ToggleButton value="rect">RECT</ToggleButton>}
+          {tools.includes('arrow') && <ToggleButton value="arrow">↔ ARROW</ToggleButton>}
         </ToggleButtonGroup>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           New color:
           <input
             type="color"
             value={color}
             onChange={(e) => setColor(e.target.value)}
-            style={{ width: 32, height: 24, padding: 0, border: 'none', background: 'transparent' }}
+            style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }}
           />
         </label>
+
         <TextField
           label="New stroke"
           type="number"
           size="small"
           value={strokeWidth}
           onChange={(e) => setStrokeWidth(Math.max(1, Number(e.target.value) || 1))}
-          inputProps={{ min: 1, style: { width: 60 } }}
+          inputProps={{ min: 1, style: { width: 56, color: '#111' } }}
+          InputLabelProps={{ style: { color: '#111' } }}
         />
+
         {tool === 'text' && (
           <TextField
             label="New font"
@@ -434,85 +394,27 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             size="small"
             value={fontSize}
             onChange={(e) => setFontSize(Math.max(8, Number(e.target.value) || 12))}
-            inputProps={{ min: 8, style: { width: 70 } }}
+            inputProps={{ min: 8, style: { width: 64, color: '#111' } }}
+            InputLabelProps={{ style: { color: '#111' } }}
           />
         )}
 
-        <Button size="small" variant="outlined" onClick={save}>Save Annotation</Button>
+        <Button size="small" variant="outlined" onClick={save} sx={{ ml: 'auto' }}>
+          Save Annotation
+        </Button>
       </Box>
-
-      {/* Selected shape property panel */}
-      {selectedShape && (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <strong>Selected:</strong> {selectedShape.type}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            Color:
-            <input
-              type="color"
-              value={selectedShape.color || '#ff0000'}
-              onChange={(e) => updateSelected({ color: e.target.value })}
-              style={{ width: 32, height: 24, padding: 0, border: 'none', background: 'transparent' }}
-            />
-          </label>
-
-          {selectedShape.type !== 'text' && (
-            <TextField
-              label="Stroke"
-              type="number"
-              size="small"
-              value={selectedShape.strokeWidth ?? 2}
-              onChange={(e) => updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })}
-              inputProps={{ min: 1, style: { width: 60 } }}
-            />
-          )}
-
-          {selectedShape.type === 'text' && (
-            <TextField
-              label="Font"
-              type="number"
-              size="small"
-              value={selectedShape.fontSize ?? 18}
-              onChange={(e) => updateSelected({ fontSize: Math.max(8, Number(e.target.value) || 12) })}
-              inputProps={{ min: 8, style: { width: 70 } }}
-            />
-          )}
-
-          {/* Rect text editing field */}
-          {selectedShape.type === 'rect' && (
-            <TextField
-              label="Box Text"
-              size="small"
-              value={selectedShape.text || ''}
-              onChange={(e) => updateSelected({ text: e.target.value })}
-              inputProps={{ style: { width: 240 } }}
-            />
-          )}
-
-          <Button
-            size="small"
-            color="error"
-            variant="outlined"
-            onClick={() => {
-              setShapes((s) => s.filter((x) => x.id !== selectedId));
-              setSelectedId(null);
-            }}
-          >
-            Delete
-          </Button>
-        </Box>
-      )}
 
       {/* Canvas area */}
       {!imgLoaded && (
         <Box
           sx={{
             width: '100%',
-            minHeight: 240,
+            minHeight: 200,
             display: 'grid',
             placeItems: 'center',
-            border: '1px dashed #888',
-            borderRadius: 1,
-            color: '#888',
+            border: '1px dashed rgba(0,0,0,0.2)',
+            borderRadius: 10,
+            color: 'rgba(0,0,0,0.6)',
             fontSize: 14,
             p: 2,
           }}
@@ -526,60 +428,45 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           ref={stageRef}
           width={stageSize.w}
           height={stageSize.h}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          style={{ maxWidth: '100%' }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          style={{ width: '100%', height: 'auto', touchAction: 'none' }}
         >
           <Layer>
             {/* Background image */}
-            <KImage image={bgImage} width={stageSize.w} height={stageSize.h} listening={false} />
+            <KImage image={bgImage} width={stageSize.w} height={stageSize.h} listening={false} cornerRadius={14} />
 
             {shapes.map((s) => {
               if (s.type === 'rect') {
-                // Handle negative width/height by normalizing for text layout
+                // Normalize negative w/h; render text inside with padding
                 const rx = s.width >= 0 ? s.x : s.x + s.width;
                 const ry = s.height >= 0 ? s.y : s.y + s.height;
                 const rw = Math.abs(s.width);
                 const rh = Math.abs(s.height);
-                const pad = 8; // padding for text inside
+                const pad = 6;
                 return (
                   <React.Fragment key={s.id}>
                     <Rect
                       id={s.id}
-                      x={rx}
-                      y={ry}
-                      width={rw}
-                      height={rh}
-                      draggable
-                      stroke={s.color}
-                      strokeWidth={s.strokeWidth}
-                      onClick={() => {
-                        setSelectedId(s.id);
-                        if (!s.text) promptRectText(s); // single-click empty -> prompt
-                      }}
-                      onDblClick={() => promptRectText(s)} // double-click to edit
-                      onTap={() => {
-                        setSelectedId(s.id);
-                        if (!s.text) promptRectText(s);
-                      }}
+                      x={rx} y={ry} width={rw} height={rh}
+                      draggable stroke={s.color} strokeWidth={s.strokeWidth}
+                      onClick={() => setSelectedId(s.id)}
+                      onTap={() => setSelectedId(s.id)}
                       onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                       onTransformEnd={(e) => onTransformEnd(e, s)}
                     />
                     {s.text && (
                       <KText
                         text={s.text}
-                        x={rx + pad}
-                        y={ry + pad}
-                        width={Math.max(1, rw - pad * 2)} // confine to box
-                        // no offset: we want top-left origin inside the rect
+                        x={rx + pad} y={ry + pad}
+                        width={Math.max(1, rw - pad * 2)}
                         fontSize={s.fontSize || fontSize}
-                        fill={s.color}
+                        fill={s.textColor || '#ffffff'}   // keep white text inside rectangle
                         align="center"
                         wrap="word"
                         listening
                         onClick={() => setSelectedId(s.id)}
-                        onDblClick={() => promptRectText(s)}
                       />
                     )}
                   </React.Fragment>
@@ -589,14 +476,9 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
               if (s.type === 'text') {
                 return (
                   <KText
-                    id={s.id}
-                    key={s.id}
-                    x={s.x}
-                    y={s.y}
-                    text={s.text}
-                    fontSize={s.fontSize}
-                    fill={s.color}
-                    draggable
+                    id={s.id} key={s.id}
+                    x={s.x} y={s.y} text={s.text}
+                    fontSize={s.fontSize} fill={s.color} draggable
                     onClick={() => setSelectedId(s.id)}
                     onTap={() => setSelectedId(s.id)}
                     onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
@@ -605,9 +487,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                 );
               }
 
-              if (s.type === 'arrow') {
-                return <React.Fragment key={s.id}>{renderArrowWithAnchors(s)}</React.Fragment>;
-              }
+              if (s.type === 'arrow') return <React.Fragment key={s.id}>{renderArrowWithAnchors(s)}</React.Fragment>;
               return null;
             })}
 
@@ -615,6 +495,96 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             <Transformer ref={trRef} rotateEnabled />
           </Layer>
         </Stage>
+      )}
+
+      {/* Floating Properties panel (kept light as earlier) */}
+      {selectedShape && propsOpen && (
+        <Paper
+          elevation={6}
+          sx={{
+            position: 'fixed',
+            right: 16,
+            bottom: 16,
+            maxWidth: 360,
+            p: 1.5,
+            borderRadius: 2,
+            background: 'rgba(245, 245, 245, 0.92)', // light utility panel
+            color: '#111',
+            border: '1px solid rgba(0,0,0,0.1)',
+            boxShadow: '0 6px 24px rgba(0,0,0,0.25)',
+            zIndex: 1400,
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+            <Box sx={{ fontWeight: 600 }}>Selected:</Box>
+            <Box sx={{ mr: 1 }}>{selectedShape.type}</Box>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              Color:
+              <input
+                type="color"
+                value={selectedShape.color || '#ff4d4d'}
+                onChange={(e) => updateSelected({ color: e.target.value })}
+                style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }}
+              />
+            </label>
+
+            {selectedShape.type !== 'text' && (
+              <TextField
+                label="Stroke"
+                type="number"
+                size="small"
+                value={selectedShape.strokeWidth ?? 2}
+                onChange={(e) => updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })}
+                inputProps={{ min: 1, style: { width: 60, color: '#111' } }}
+              />
+            )}
+
+            {selectedShape.type === 'rect' && (
+              <>
+                <TextField
+                  label="Box Text"
+                  size="small"
+                  value={selectedShape.text || ''}
+                  onChange={(e) => updateSelected({ text: e.target.value })}
+                  inputProps={{ style: { width: 200, color: '#111' } }}
+                />
+                <TextField
+                  label="Box Font"
+                  type="number"
+                  size="small"
+                  value={selectedShape.fontSize ?? 18}
+                  onChange={(e) => updateSelected({ fontSize: Math.max(8, Number(e.target.value) || 12) })}
+                  inputProps={{ min: 8, style: { width: 76, color: '#111' } }}
+                />
+              </>
+            )}
+
+            <Box sx={{ flex: 1 }} />
+
+            <Button
+              size="small"
+              color="error"
+              variant="outlined"
+              onClick={() => {
+                setShapes((s) => s.filter((x) => x.id !== selectedId));
+                setSelectedId(null);
+              }}
+            >
+              Delete
+            </Button>
+
+            <IconButton
+              size="small"
+              onClick={() => setPropsOpen(false)}
+              sx={{ color: '#111', ml: 1 }}
+              aria-label="Close properties"
+            >
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </Box>
+        </Paper>
       )}
     </Box>
   );
