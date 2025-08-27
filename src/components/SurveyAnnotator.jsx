@@ -61,7 +61,8 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
 
   const { img: bgImage, loaded: imgLoaded } = useLoadedImage(file);
 
-  const [tool, setTool] = useState('rect');
+  // Default tool → 'arrow'
+  const [tool, setTool] = useState('arrow');
   const [color, setColor] = useState('#ff0000');
   const [strokeWidth, setStrokeWidth] = useState(2);
   const [fontSize, setFontSize] = useState(18);
@@ -147,6 +148,18 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           draggable: true,
           text: '',      // text box content
           fontSize,      // text size for box label
+        };
+      }
+      if (tool === 'text') {
+        return {
+          id,
+          type: 'text',
+          x: pos.x,
+          y: pos.y,
+          text: '',
+          color,
+          fontSize,
+          draggable: true,
         };
       }
       return null;
@@ -258,18 +271,30 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   };
 
   // --- Endpoint anchors for ARROW ---
-  const Anchor = ({ x, y, onDragMove }) => (
-    <Circle
-      x={x}
-      y={y}
-      radius={6}
-      fill="#00b7ff"
-      stroke="white"
-      strokeWidth={1}
-      draggable
-      onDragMove={onDragMove}
-    />
-  );
+  const Anchor = ({ x, y, onDragMove, onMouseDown }) => (
+  <Circle
+    x={x}
+    y={y}
+    radius={10}                 // nice big hit area
+    fill="#00b7ff"
+    stroke="white"
+    strokeWidth={1}
+    draggable
+    onMouseDown={(e) => { e.cancelBubble = true; onMouseDown?.(e); }}
+    onDragMove={(e) => {
+      e.cancelBubble = true;
+      const stage = e.target.getStage();
+      const pos = stage.getPointerPosition();   // <-- always accurate
+      // keep the handle exactly under the cursor
+      e.target.position(pos);
+      // notify parent with true stage coords
+      onDragMove({ x: pos.x, y: pos.y });
+    }}
+    onDragStart={(e) => { e.cancelBubble = true; }}
+    onDragEnd={(e) => { e.cancelBubble = true; }}
+  />
+);
+
 
   const renderArrowWithAnchors = (s) => {
     const [x1, y1, x2, y2] = s.points;
@@ -299,10 +324,12 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           stroke={s.color}
           fill={s.color}
           strokeWidth={s.strokeWidth}
-          pointerLength={10}
-          pointerWidth={10}
+          pointerLength={12}
+          pointerWidth={12}
           pointerAtBeginning
-          onClick={() => setSelectedId(s.id)}
+          hitStrokeWidth={20}                 // easier to select
+          onMouseDown={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
+          onClick={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
           onTap={() => setSelectedId(s.id)}
         />
 
@@ -310,7 +337,9 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         <Group
           x={mid.x}
           y={mid.y}
-          onClick={() => {
+          onMouseDown={(e) => { e.cancelBubble = true; }}
+          onClick={(e) => {
+            e.cancelBubble = true;
             const v = window.prompt('Enter measurement (mm):', s.measure != null ? String(s.measure) : '');
             if (v == null) return;
             const n = Number(v);
@@ -342,8 +371,18 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         {/* End anchors */}
         {selectedId === s.id && (
           <>
-            <Anchor x={x1} y={y1} onDragMove={(e) => { const p = e.target.position(); setEnd('start', p.x, p.y); }} />
-            <Anchor x={x2} y={y2} onDragMove={(e) => { const p = e.target.position(); setEnd('end', p.x, p.y); }} />
+            <Anchor
+  x={x1}
+  y={y1}
+  onMouseDown={() => setSelectedId(s.id)}
+  onDragMove={({ x, y }) => setEnd('start', x, y)}
+/>
+<Anchor
+  x={x2}
+  y={y2}
+  onMouseDown={() => setSelectedId(s.id)}
+  onDragMove={({ x, y }) => setEnd('end', x, y)}
+/>
           </>
         )}
       </>
@@ -498,11 +537,12 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
 
             {shapes.map((s) => {
               if (s.type === 'rect') {
-                // Handle negative width/height by normalizing for centered text
+                // Handle negative width/height by normalizing for text layout
                 const rx = s.width >= 0 ? s.x : s.x + s.width;
                 const ry = s.height >= 0 ? s.y : s.y + s.height;
                 const rw = Math.abs(s.width);
                 const rh = Math.abs(s.height);
+                const pad = 8; // padding for text inside
                 return (
                   <React.Fragment key={s.id}>
                     <Rect
@@ -529,15 +569,17 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                     {s.text && (
                       <KText
                         text={s.text}
-                        x={rx + rw / 2}
-                        y={ry + rh / 2}
-                        offsetX={(s.text.length * (s.fontSize || fontSize)) / 4}
-                        offsetY={(s.fontSize || fontSize) / 2}
+                        x={rx + pad}
+                        y={ry + pad}
+                        width={Math.max(1, rw - pad * 2)} // confine to box
+                        // no offset: we want top-left origin inside the rect
                         fontSize={s.fontSize || fontSize}
                         fill={s.color}
+                        align="center"
+                        wrap="word"
+                        listening
                         onClick={() => setSelectedId(s.id)}
                         onDblClick={() => promptRectText(s)}
-                        listening
                       />
                     )}
                   </React.Fragment>
