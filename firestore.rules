@@ -1,28 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Users: only each user can read/write their own profile
-    match /users/{userId} {
-      allow read, write: if request.auth != null
-                       && request.auth.uid == userId;
-    }
-
-    // Jobs: managers can do anything; staff only read their assigned jobs
-    match /jobs/{jobId} {
-      // create/update/delete by managers only
-      allow create, update, delete: if isManager();
-      // read by managers or by staff assigned to this job
-      allow read: if isManager()
-               || (request.auth != null
-                   && resource.data.assignedTo == request.auth.uid);
+    match /{document=**} {
+      allow read, write: if request.auth != null;
     }
   }
-}
-
-// helper function
-function isManager() {
-  return request.auth != null
-      && get(/databases/$(database)/documents/users/$(request.auth.uid))
-           .data.role == 'manager';
 }

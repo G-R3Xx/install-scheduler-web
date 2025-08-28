@@ -12,6 +12,7 @@ import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { v4 as uuid } from 'uuid';
 import ErrorBoundary from '../components/ErrorBoundary';
+import { createSurveyJob } from '../services/surveyService'; // <-- NEW
 
 const SurveyAnnotator = lazy(() => import('../components/SurveyAnnotator'));
 
@@ -60,12 +61,16 @@ export default function SiteSurveyPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
 
+  const [saving, setSaving] = useState(false);
+
   const [client, setClient] = useState({
     name: '',
+    company: '',          // <-- NEW
     contact: '',
     phone: '',
     email: '',
     address: '',
+    description: '',      // <-- NEW (survey-wide notes)
   });
 
   const [signs, setSigns] = useState([
@@ -137,19 +142,38 @@ export default function SiteSurveyPage() {
     setSigns(next);
   };
 
-  const saveSurveyLocallyForNow = () => {
-    console.log('Client:', client);
-    console.log(
-      'Signs:',
-      signs.map((s) => ({
+  // ---------- CLOUD SAVE ----------
+  const saveSurvey = async () => {
+    try {
+      if (!client.name?.trim()) {
+        alert('Please enter a Client name before saving.');
+        return;
+      }
+      setSaving(true);
+
+      // Map current signs to service shape
+      const serviceSigns = signs.map((s) => ({
         id: s.id,
         name: s.name,
-        hasOriginal: !!s.fileOriginal,
-        hasPreview: !!s.previewUrl,
-        hasAnnotation: !!s.annotatedBlob,
-      }))
-    );
-    alert('Survey captured (local only). Next step: wire Firebase save + email.');
+        description: s.description || '',
+        file: s.fileOriginal || null,      // original file used for upload
+        annotatedBlob: s.annotatedBlob || null,
+        stageJSON: s.stageJSON || null,
+      }));
+
+      const { id, jobNumber } = await createSurveyJob({
+        client,
+        signs: serviceSigns,
+      });
+
+      alert(`Survey saved as Job #${jobNumber}\n\nDoc ID: ${id}`);
+      // Optionally navigate: e.g. history.push(`/jobs/${id}`)
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || 'Failed to save survey.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -175,25 +199,42 @@ export default function SiteSurveyPage() {
         {/* Job details */}
         <Divider sx={{ my: 1, borderColor: 'rgba(255,255,255,0.2)' }} />
         <Box sx={{ display: 'grid', gap: 1.25 }}>
-          {['Client', 'Contact Person', 'Contact Phone', 'Contact Email', 'Site Address'].map(
-            (label, idx) => {
-              const keys = ['name', 'contact', 'phone', 'email', 'address'];
-              return (
-                <TextField
-                  key={label}
-                  size={isMobile ? 'small' : 'medium'}
-                  label={label}
-                  value={client[keys[idx]]}
-                  onChange={(e) => setClient({ ...client, [keys[idx]]: e.target.value })}
-                  fullWidth
-                  InputLabelProps={{ style: { color: 'white' } }}
-                  InputProps={{
-                    style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
-                  }}
-                />
-              );
-            }
-          )}
+          {[
+            { label: 'Client', key: 'name' },
+            { label: 'Company', key: 'company' },            // NEW
+            { label: 'Contact Person', key: 'contact' },
+            { label: 'Contact Phone', key: 'phone' },
+            { label: 'Contact Email', key: 'email' },
+            { label: 'Site Address', key: 'address' },
+          ].map(({ label, key }) => (
+            <TextField
+              key={key}
+              size={isMobile ? 'small' : 'medium'}
+              label={label}
+              value={client[key]}
+              onChange={(e) => setClient({ ...client, [key]: e.target.value })}
+              fullWidth
+              InputLabelProps={{ style: { color: 'white' } }}
+              InputProps={{
+                style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
+              }}
+            />
+          ))}
+
+          {/* Survey-wide notes/description (goes to job.description) */}
+          <TextField
+            size={isMobile ? 'small' : 'medium'}
+            label="Description / Notes"
+            value={client.description}
+            onChange={(e) => setClient({ ...client, description: e.target.value })}
+            fullWidth
+            multiline
+            minRows={4}
+            InputLabelProps={{ style: { color: 'white' } }}
+            InputProps={{
+              style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
+            }}
+          />
         </Box>
 
         {/* Sign sections */}
@@ -283,8 +324,13 @@ export default function SiteSurveyPage() {
         </Box>
 
         <Box sx={{ display: 'flex', gap: 1, flexDirection: isMobile ? 'column' : 'row' }}>
-          <Button fullWidth={isMobile} variant="contained" onClick={saveSurveyLocallyForNow}>
-            Save Survey
+          <Button
+            fullWidth={isMobile}
+            variant="contained"
+            onClick={saveSurvey}
+            disabled={saving}
+          >
+            {saving ? 'Saving…' : 'Save Survey'}
           </Button>
         </Box>
       </Box>

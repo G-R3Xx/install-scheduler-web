@@ -13,6 +13,7 @@ import OhsFormPage from './pages/OhsFormPage';
 import { LocalizationProvider } from '@mui/x-date-pickers';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import SplashScreen from './components/SplashScreen';
+import SiteSurveyPage from './pages/SiteSurveyPage';
 
 function RequireAuth({ children }) {
   const { currentUser } = useAuth();
@@ -64,6 +65,7 @@ function AppRoutes() {
         </RequireAuth>
       </Route>
 
+<Route path="/surveys/new" component={SiteSurveyPage} />
       {/* Fallback */}
       <Redirect to="/" />
     </Switch>
