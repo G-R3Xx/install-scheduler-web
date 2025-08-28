@@ -1,0 +1,31 @@
+.manage-users {
+  max-width: 800px;
+  margin: 2rem auto;
+  padding: 1rem;
+}
+.user-form {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.user-form label {
+  display: flex;
+  flex-direction: column;
+}
+.user-form button {
+  align-self: flex-end;
+  padding: 0.5rem 1rem;
+}
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.users-table th,
+.users-table td {
+  border: 1px solid #ddd;
+  padding: 0.5rem;
+}
+.users-table th {
+  background: #f0f0f0;
+  text-align: left;
+}

@@ -1,0 +1,23 @@
+.joblist-container {
+  max-width: 800px;
+  margin: 2rem auto;
+  padding: 1rem;
+}
+.joblist-container button {
+  margin-bottom: 1rem;
+}
+.filters {
+  margin-bottom: 1rem;
+}
+.jobs-list {
+  list-style: none;
+  padding: 0;
+}
+.jobs-list li {
+  padding: 0.5rem;
+  border-bottom: 1px solid #ddd;
+  cursor: pointer;
+}
+.jobs-list li:hover {
+  background: #f0f0f0;
+}

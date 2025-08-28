@@ -1,4 +1,4 @@
-# dependencies & caches
+﻿# dependencies & caches
 node_modules/
 **/node_modules/
 .cache/
@@ -9,13 +9,11 @@ node_modules/
 .pnp/
 .pnp.cjs
 
-# builds / coverage / outputs
+# builds
 build/
 dist/
 coverage/
 out/
-tmp/
-temp/
 
 # logs
 npm-debug.log*
@@ -34,7 +32,3 @@ firebase-debug.log
 .vscode/
 .idea/
 Thumbs.db
-
-# misc
-*.swp
-*.swo

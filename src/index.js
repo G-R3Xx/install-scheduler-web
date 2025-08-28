@@ -1,17 +1,46 @@
+// src/index.js
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import './index.css';
 import App from './App';
-import reportWebVitals from './reportWebVitals';
+import { AuthProvider } from './contexts/AuthContext';
+import { ThemeProvider, CssBaseline } from '@mui/material';
+import './index.css'; // keep your global CSS (optional but recommended)
+import theme from './theme';
+
+const MIN_SPLASH_MS = 700; // 👈 adjust this to taste (e.g., 500–1000ms)
+const startAt = performance.now();
+
+function removeSplashWithDelay() {
+  const splash = document.getElementById('splash-screen');
+  if (!splash) return;
+
+  const elapsed = performance.now() - startAt;
+  const remaining = Math.max(0, MIN_SPLASH_MS - elapsed);
+
+  // Wait so the splash shows at least MIN_SPLASH_MS
+  setTimeout(() => {
+    // optional fade-out
+    splash.classList.add('fade-out');
+    // remove after the CSS transition
+    setTimeout(() => {
+      if (splash && splash.parentNode) {
+        splash.parentNode.removeChild(splash);
+      }
+    }, 220); // keep in sync with CSS transition duration
+  }, remaining);
+}
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
+
+// Render first, then schedule splash removal (post-commit)
 root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+  <ThemeProvider theme={theme}>
+    <CssBaseline />
+    <AuthProvider>
+      <App />
+    </AuthProvider>
+  </ThemeProvider>
 );
 
-// If you want to start measuring performance in your app, pass a function
-// to log results (for example: reportWebVitals(console.log))
-// or send to an analytics endpoint. Learn more: https://bit.ly/CRA-vitals
-reportWebVitals();
+// Ensure we wait at least one frame, then apply min delay logic
+requestAnimationFrame(removeSplashWithDelay);

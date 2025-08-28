@@ -1,0 +1,39 @@
+.detail-container {
+  max-width: 700px;
+  margin: 2rem auto;
+  padding: 1rem;
+}
+.back-btn {
+  background: transparent;
+  border: none;
+  color: #1976d2;
+  cursor: pointer;
+  margin-bottom: 1rem;
+}
+.detail-content img.detail-img {
+  max-width: 100%;
+  margin: 0.5rem 0;
+  border: 1px solid #ddd;
+}
+.actions {
+  margin-top: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.file-label {
+  display: flex;
+  flex-direction: column;
+}
+.sig-pad {
+  border: 1px solid #ddd;
+  width: 300px;
+  height: 100px;
+}
+.pdf-btn {
+  background: #1976d2;
+  color: white;
+  border: none;
+  padding: 0.5rem;
+  cursor: pointer;
+}
