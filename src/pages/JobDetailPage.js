@@ -1,5 +1,5 @@
 // src/pages/JobDetailPage.js
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -15,8 +15,10 @@ import {
   Snackbar,
   Alert,
   DialogTitle,
-  DialogActions
+  DialogActions,
+  Paper
 } from '@mui/material';
+import { DatePicker } from '@mui/x-date-pickers';
 import { useParams, useHistory } from 'react-router-dom';
 import {
   doc,
@@ -29,7 +31,9 @@ import {
   orderBy,
   limit,
   serverTimestamp,
-  deleteField
+  deleteField,
+  Timestamp,
+  deleteDoc
 } from 'firebase/firestore';
 import { db, storage } from '../firebase/firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -37,13 +41,27 @@ import SignatureCanvas from 'react-signature-canvas';
 import { useAuth } from '../contexts/AuthContext';
 import OhsPromptOnLoad from '../components/OhsPromptOnLoad';
 import { jsPDF } from 'jspdf';
+import { convertSurveyToJob } from '../services/surveyService';
 
-// ---- Functions endpoint base ----
-// Set REACT_APP_FUNCTIONS_BASE in .env to override.
-// Fallback uses your project id from earlier messages.
 const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE ||
   'https://us-central1-install-scheduler.cloudfunctions.net';
+
+// ---------- helpers ----------
+const getUserNameFromAny = (u, userMap) => {
+  const id =
+    typeof u === 'string' ? u :
+    (u && (u.id || u.uid)) || '';
+  const rec = id ? userMap?.[id] : null;
+  return rec?.shortName || rec?.displayName || rec?.email || 'Unknown';
+};
+
+const fmtDateAU = (val) => {
+  const d =
+    val?.toDate?.() instanceof Date ? val.toDate()
+      : (val instanceof Date ? val : null);
+  return d ? d.toLocaleDateString('en-AU') : '';
+};
 
 export default function JobDetailPage() {
   const { jobId } = useParams();
@@ -63,24 +81,24 @@ export default function JobDetailPage() {
   const [resending, setResending] = useState(false);
   const [snack, setSnack] = useState({ open: false, severity: 'success', msg: '' });
 
-  // ---------- helpers ----------
-  const getUserName = (uid) => userMap?.[uid]?.shortName || 'Unknown';
-  const toDateString = (tsOrDate) =>
-    tsOrDate?.toDate?.()?.toLocaleDateString?.() ||
-    (tsOrDate instanceof Date ? tsOrDate.toLocaleDateString() : '');
+  // ---- Convert to Job dialog ----
+  const [convertOpen, setConvertOpen] = useState(false);
+  const [convertDate, setConvertDate] = useState(null);
+  const [allUsers, setAllUsers] = useState([]);
+  const [assignSel, setAssignSel] = useState([]); // [{id,label}]
 
   const extractNiceName = (url, fallback) => {
     try {
       const decoded = decodeURIComponent(url);
-      // Try to derive from /plans/<filename> first
       const afterPlans = decoded.split('/plans/')[1];
       if (afterPlans) return afterPlans.split('?')[0];
-      // Otherwise from /referencePhotos/ or /photos/
       const afterPhotos = decoded.split('/referencePhotos/')[1] || decoded.split('/photos/')[1];
       if (afterPhotos) return afterPhotos.split('?')[0];
     } catch { /* ignore */ }
     return fallback;
   };
+
+  const isSurvey = job?.jobType === 'survey';
 
   // ---------- data fetch ----------
   const fetchJob = useCallback(async () => {
@@ -88,7 +106,6 @@ export default function JobDetailPage() {
     if (!snap.exists()) return;
     const data = snap.data() || {};
 
-    // Coerce many legacy shapes into a clean string[] and rich[] for plans
     const rawPlans =
       data.plans ??
       data.planUrls ??
@@ -101,7 +118,6 @@ export default function JobDetailPage() {
     let plans = [];
     let plansRich = [];
 
-    // Accept: string, string[], [{ url|href|downloadURL|path|storagePath, name? }]
     if (Array.isArray(rawPlans)) {
       plansRich = rawPlans.map(p => {
         if (typeof p === 'string') return { url: p };
@@ -119,14 +135,13 @@ export default function JobDetailPage() {
       plansRich = [{ url: rawPlans }];
     }
 
-    // Normalize other legacy fields
     const normalized = {
       id: snap.id,
       ...data,
       referencePhotos: Array.isArray(data.referencePhotos) ? data.referencePhotos : [],
       completedPhotos: Array.isArray(data.completedPhotos) ? data.completedPhotos : [],
-      plans,      // string[] urls or storage paths
-      plansRich,  // [{url,name?}]
+      plans,
+      plansRich,
     };
 
     setJob(normalized);
@@ -139,10 +154,44 @@ export default function JobDetailPage() {
     setTimeEntries(entries);
   }, [jobId]);
 
+  // Load assignable users (for Convert dialog)
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDocs(collection(db, 'users'));
+        const list = snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) }));
+        setAllUsers(list);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const userOptions = useMemo(
+    () => allUsers.map(u => ({ id: u.id, label: u.shortName || u.displayName || u.email || u.id })),
+    [allUsers]
+  );
+
   useEffect(() => {
     fetchJob();
     fetchHours();
   }, [fetchJob, fetchHours]);
+
+  // ---------- NEW: per-user hours ----------
+  const hoursByUser = useMemo(() => {
+    const map = {};
+    for (const e of timeEntries) {
+      const uid = e.userId || 'unknown';
+      map[uid] = (map[uid] || 0) + (Number(e.hours) || 0);
+    }
+    return map;
+  }, [timeEntries]);
+
+  const hoursByUserList = useMemo(
+    () =>
+      Object.entries(hoursByUser)
+        .map(([uid, hrs]) => ({ uid, hrs: Math.round(hrs * 10) / 10 }))
+        .sort((a, b) => b.hrs - a.hrs),
+    [hoursByUser]
+  );
 
   // ---------- actions ----------
   const handleAddHours = async () => {
@@ -171,37 +220,32 @@ export default function JobDetailPage() {
       newUrls.push(url);
     }
 
-    // Update local state first for snappy UI
     setJob(prev => ({
       ...prev,
       completedPhotos: [...(prev.completedPhotos || []), ...newUrls]
     }));
 
-    // Persist in Firestore
     await updateDoc(doc(db, 'jobs', jobId), {
       completedPhotos: [...(job?.completedPhotos || []), ...newUrls]
     });
 
-    // reset input
     e.target.value = '';
   };
 
   const handleSaveSignature = async () => {
     if (!sigPad || sigPad.isEmpty()) return;
     const dataUrl = sigPad.getTrimmedCanvas().toDataURL('image/png');
-
     const blob = await (await fetch(dataUrl)).blob();
     const fileRef = ref(storage, `jobs/${jobId}/signature.png`);
     await uploadBytes(fileRef, blob);
     const url = await getDownloadURL(fileRef);
-
     await updateDoc(doc(db, 'jobs', jobId), { signatureURL: url });
     setSignatureURL(url);
   };
 
   const handleCompleteJob = async () => {
     await updateDoc(doc(db, 'jobs', jobId), { status: 'complete' });
-    history.push('/'); // back to list after completing
+    history.push('/');
   };
 
   const handleReopenJob = async () => {
@@ -214,7 +258,6 @@ export default function JobDetailPage() {
     setImageDialogOpen(true);
   };
 
-  // ---------- OHS: set/clear status directly ----------
   const handleMarkOhsCompleted = async () => {
     await updateDoc(doc(db, 'jobs', jobId), {
       ohsCompleted: true,
@@ -236,7 +279,17 @@ export default function JobDetailPage() {
     await fetchJob();
   };
 
-  // ---------- OHS: PDF download (latest form) ----------
+  const handleDeleteJob = async () => {
+    if (!window.confirm('Are you sure you want to permanently delete this job?')) return;
+    try {
+      await deleteDoc(doc(db, 'jobs', jobId));
+      history.push('/'); // go back to list
+    } catch (err) {
+      console.error('Failed to delete job', err);
+      alert('Failed to delete job.');
+    }
+  };
+
   const downloadLatestOhsPdf = async () => {
     try {
       const formsRef = collection(db, 'jobs', jobId, 'ohsForms');
@@ -314,7 +367,6 @@ export default function JobDetailPage() {
     }
   };
 
-  // ---------- Plans: open URL or resolve Storage path ----------
   const openPlan = async (planObjOrUrl) => {
     const candidate = typeof planObjOrUrl === 'string'
       ? planObjOrUrl
@@ -327,13 +379,10 @@ export default function JobDetailPage() {
 
     if (!candidate) return;
 
-    // If already a full http(s) URL, open directly
     if (/^https?:\/\//i.test(candidate)) {
       window.open(candidate, '_blank');
       return;
     }
-
-    // Otherwise treat as Storage path and resolve
     try {
       const storageRef = ref(storage, candidate);
       const dl = await getDownloadURL(storageRef);
@@ -344,7 +393,6 @@ export default function JobDetailPage() {
     }
   };
 
-  // ---------- Resend completion email ----------
   const doResend = async () => {
     setResending(true);
     try {
@@ -364,22 +412,78 @@ export default function JobDetailPage() {
     }
   };
 
+  // ---- Convert to Job ----
+  const doConvert = async () => {
+    try {
+      const dateValue =
+        convertDate?.toDate?.() instanceof Date ? convertDate.toDate() :
+        (convertDate instanceof Date ? convertDate : null);
+
+      const assignedIds = Array.isArray(assignSel) ? assignSel.map(v => v.id) : [];
+      await convertSurveyToJob(jobId, {
+        installDate: dateValue || null,
+        assignedTo: assignedIds,
+        keepExistingDescription: true,
+      });
+      setConvertOpen(false);
+      await fetchJob();
+      setSnack({ open: true, severity: 'success', msg: 'Converted to job.' });
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || 'Failed to convert survey.');
+    }
+  };
+
   if (!job) return <Box p={3}><Typography>Loading…</Typography></Box>;
 
-  const assignedArray = Array.isArray(job.assignedTo) ? job.assignedTo : (job.assignedTo ? [job.assignedTo] : []);
-  const installDateStr = toDateString(job.installDate);
+  // normalize assignedTo to a clean array of string IDs for rendering
+  const assignedIds = Array.isArray(job?.assignedTo)
+    ? job.assignedTo
+        .map(u => (typeof u === 'string' ? u : (u?.id || u?.uid || '')))
+        .filter(Boolean)
+    : [];
+
+  const installDateStr = fmtDateAU(job.installDate);
   const userTotal = timeEntries.filter(e => e.userId === currentUser.uid).reduce((s, e) => s + (e.hours || 0), 0);
   const jobTotal = timeEntries.reduce((s, e) => s + (e.hours || 0), 0);
   const ohsDone = !!job.ohsCompleted || !!job.ohsCompletedAt;
 
   return (
     <Box p={3}>
-      {/* OHS PROMPT */}
-      <OhsPromptOnLoad jobId={jobId} jobStatus={job?.status} />
+      {/* Only prompt OHS for real jobs, not surveys */}
+      {!isSurvey && <OhsPromptOnLoad jobId={jobId} jobStatus={job?.status} />}
 
       <Card>
         <CardContent>
-          <Typography variant="h5" gutterBottom>Job Details</Typography>
+          <Typography variant="h5" gutterBottom>
+            {isSurvey ? 'Survey Details' : 'Job Details'}
+          </Typography>
+
+          {/* Survey banner */}
+          {isSurvey && (
+            <Paper
+              elevation={0}
+              sx={{
+                p: 2,
+                mb: 2,
+                borderRadius: 2,
+                bgcolor: 'rgba(25,118,210,0.08)',
+                border: '1px solid rgba(25,118,210,0.35)'
+              }}
+            >
+              <Typography variant="subtitle1" sx={{ mb: 1 }}>
+                This is a <strong>Survey</strong>. It isn’t scheduled or trackable until converted to a job.
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                <Button variant="contained" onClick={() => setConvertOpen(true)}>
+                  Convert to Job
+                </Button>
+                <Button variant="outlined" onClick={() => history.push('/')}>
+                  Back to List
+                </Button>
+              </Box>
+            </Paper>
+          )}
 
           {/* CLIENT DETAILS */}
           <Box mt={2}>
@@ -393,236 +497,270 @@ export default function JobDetailPage() {
             <Typography><strong>Address:</strong> {job.address}</Typography>
           </Box>
 
-          {/* JOB INFO */}
+          {/* JOB / SURVEY INFO */}
           <Box mt={3}>
-            <Typography variant="h6">Job Info</Typography>
+            <Typography variant="h6">{isSurvey ? 'Survey Info' : 'Job Info'}</Typography>
             <Divider sx={{ mb: 1 }} />
-            <Typography><strong>Description:</strong> {job.description}</Typography>
-            <Typography><strong>Status:</strong> {job.status}</Typography>
-            <Typography><strong>Install Date:</strong> {installDateStr}</Typography>
-            <Typography><strong>Assigned To:</strong></Typography>
-            <Box display="flex" gap={1} flexWrap="wrap" mt={1}>
-              {assignedArray.length
-                ? assignedArray.map(uid => <Chip key={uid} label={getUserName(uid)} />)
-                : <Chip label="Unassigned" />}
-            </Box>
-          </Box>
 
-          {/* OHS STATUS & ACTIONS */}
-          <Box mt={3}>
-            <Typography variant="h6">OHS</Typography>
-            <Divider sx={{ mb: 1 }} />
-            <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
-              {ohsDone ? (
-                <Chip
-                  label={`OHS Completed${job.ohsCompletedAt?.toDate ? ` · ${job.ohsCompletedAt.toDate().toLocaleString()}` : ''}`}
-                  color="success"
-                />
-              ) : (
-                <Chip label="OHS Not Completed" color="warning" />
-              )}
-
-              <Button
-                variant="outlined"
-                onClick={downloadLatestOhsPdf}
-                disabled={!ohsDone}
-              >
-                View latest OHS PDF
-              </Button>
-
-              {!ohsDone && (
-                <Button
-                  variant="contained"
-                  color="success"
-                  onClick={handleMarkOhsCompleted}
-                >
-                  Mark OHS Completed
-                </Button>
-              )}
-
-              {ohsDone && (
-                <Button
-                  variant="text"
-                  color="warning"
-                  onClick={handleClearOhsStatus}
-                >
-                  Clear OHS Status
-                </Button>
-              )}
-
-              {!ohsDone && (
-                <Button
-                  variant="outlined"
-                  onClick={() => history.push(`/jobs/${jobId}/ohs`)}
-                >
-                  Complete OHS now
-                </Button>
-              )}
-
-              {/* NEW: Resend completion email */}
-              <Button
-                variant="outlined"
-                color="secondary"
-                onClick={() => setResendOpen(true)}
-              >
-                Resend completion email
-              </Button>
-            </Box>
-          </Box>
-
-          {/* PLANS (PDF) */}
-          <Box mt={3}>
-            <Typography variant="h6">Plans (PDF)</Typography>
-            <Divider sx={{ mb: 1 }} />
-            {(!job.plans || job.plans.length === 0) && (
-              <Typography color="text.secondary">No plans uploaded.</Typography>
-            )}
-            <Box display="flex" flexDirection="column" gap={1} mt={1}>
-              {(job.plansRich && job.plansRich.length ? job.plansRich : (job.plans || []).map(u => ({ url: u }))).map((p, idx) => {
-                const url = p.url || '';
-                const label =
-                  p.name || p.title || (() => {
-                    try {
-                      const decoded = decodeURIComponent(url);
-                      const last = decoded.split('?')[0].split('/').pop();
-                      return last || `Plan ${idx + 1}`;
-                    } catch {
-                      return `Plan ${idx + 1}`;
-                    }
-                  })();
-
-                return (
-                  <Button
-                    key={`${url}-${idx}`}
-                    variant="outlined"
-                    onClick={() => openPlan(p)}
-                    sx={{ justifyContent: 'flex-start' }}
-                    disabled={!url}
-                  >
-                    {label}
-                  </Button>
-                );
-              })}
-            </Box>
-          </Box>
-
-          {/* REFERENCE PHOTOS */}
-          <Box mt={3}>
-            <Typography variant="h6">Reference Photos</Typography>
-            <Divider sx={{ mb: 1 }} />
-            {(!job.referencePhotos || job.referencePhotos.length === 0) && (
-              <Typography color="text.secondary">No reference photos.</Typography>
-            )}
-            <Grid container spacing={1}>
-              {(job.referencePhotos || []).map((url, idx) => (
-                <Grid item key={idx}>
-                  <img
-                    src={url}
-                    alt={`ref-${idx}`}
-                    style={{ width: 100, height: 100, objectFit: 'cover', cursor: 'pointer', borderRadius: 4 }}
-                    onClick={() => openImagePopup(url)}
-                  />
-                </Grid>
-              ))}
-            </Grid>
-          </Box>
-
-          {/* COMPLETED PHOTOS */}
-          <Box mt={3}>
-            <Typography variant="h6">Completed Photos</Typography>
-            <Divider sx={{ mb: 1 }} />
-            <Button variant="outlined" component="label" sx={{ mt: 1 }}>
-              Upload Photos
-              <input type="file" hidden accept="image/*" multiple onChange={handlePhotoUpload} />
-            </Button>
-            {(!job.completedPhotos || job.completedPhotos.length === 0) && (
-              <Typography color="text.secondary" mt={1}>No completed photos yet.</Typography>
-            )}
-            <Grid container spacing={1} mt={1}>
-              {(job.completedPhotos || []).map((url, idx) => (
-                <Grid item key={idx}>
-                  <img
-                    src={url}
-                    alt={`completed-${idx}`}
-                    style={{ width: 100, height: 100, objectFit: 'cover', cursor: 'pointer', borderRadius: 4 }}
-                    onClick={() => openImagePopup(url)}
-                  />
-                </Grid>
-              ))}
-            </Grid>
-          </Box>
-
-          {/* SIGNATURE */}
-          <Box mt={3}>
-            <Typography variant="h6">Client Signature</Typography>
-            <Divider sx={{ mb: 1 }} />
-            {signatureURL ? (
-              <img
-                src={signatureURL}
-                alt="signature"
-                style={{ border: '1px solid #ccc', height: 120, borderRadius: 4 }}
-              />
+            {/* Description */}
+            {job.description ? (
+              <Typography sx={{ whiteSpace: 'pre-wrap' }}>
+                <strong>Description:</strong> {job.description}
+              </Typography>
             ) : (
+              <Typography><strong>Description:</strong> —</Typography>
+            )}
+
+            {/* Survey notes list (if present) */}
+            {Array.isArray(job.surveyNotes) && job.surveyNotes.length > 0 && (
+              <Box sx={{ mt: 1 }}>
+                <Typography sx={{ mb: 0.5 }}><strong>Survey notes:</strong></Typography>
+                <ul style={{ marginTop: 0 }}>
+                  {job.surveyNotes.map((n, i) => (
+                    <li key={i} style={{ lineHeight: 1.5 }}>{n}</li>
+                  ))}
+                </ul>
+              </Box>
+            )}
+
+            <Typography><strong>Status:</strong> {job.status}</Typography>
+
+            {!isSurvey && (
               <>
-                <Box
-                  sx={{
-                    border: '1px solid #ccc',
-                    width: 320,
-                    height: 140,
-                    mb: 1,
-                    borderRadius: 1
-                  }}
-                >
-                  <SignatureCanvas
-                    penColor="black"
-                    canvasProps={{ width: 320, height: 140, style: { display: 'block' } }}
-                    ref={ref => setSigPad(ref)}
-                  />
+                <Typography><strong>Install Date:</strong> {installDateStr}</Typography>
+                <Typography sx={{ mt: 1 }}><strong>Assigned To:</strong></Typography>
+                <Box display="flex" gap={1} flexWrap="wrap" mt={1}>
+                  {assignedIds.length
+                    ? assignedIds.map(uid => <Chip key={uid} label={getUserNameFromAny(uid, userMap)} />)
+                    : <Chip label="Unassigned" />}
                 </Box>
-                <Button variant="outlined" onClick={handleSaveSignature}>Save Signature</Button>
               </>
             )}
           </Box>
 
-          {/* TIME TRACKING */}
-          <Box mt={3}>
-            <Typography variant="h6">Time Tracking</Typography>
-            <Divider sx={{ mb: 1 }} />
-            <Typography><strong>Your total:</strong> {userTotal} hrs</Typography>
-            <Typography><strong>Job total:</strong> {jobTotal} hrs</Typography>
-            <Box mt={1} display="flex" alignItems="center" gap={2}>
-              <TextField
-                label="Add Hours"
-                type="number"
-                value={hours}
-                onChange={e => setHours(e.target.value)}
-                sx={{ width: 160 }}
-              />
-              <Button variant="outlined" onClick={handleAddHours}>Submit</Button>
+          {/* SURVEY SIGNS (only for surveys) */}
+          {isSurvey && (
+            <Box mt={3}>
+              <Typography variant="h6">Survey Signs</Typography>
+              <Divider sx={{ mb: 1 }} />
+              {(!job.signs || job.signs.length === 0) && (
+                <Typography color="text.secondary">No signs captured.</Typography>
+              )}
+              <Grid container spacing={2} mt={0.5}>
+                {(job.signs || []).map((s, idx) => (
+                  <Grid item key={s.id || idx} xs={12} md={6}>
+                    <Paper sx={{ p: 1.5, borderRadius: 2 }}>
+                      <Typography variant="subtitle1" sx={{ mb: 1 }}>
+                        {s.name || `Sign ${idx + 1}`}
+                      </Typography>
+                      {s.annotatedImageUrl || s.originalImageUrl ? (
+                        <img
+                          src={s.annotatedImageUrl || s.originalImageUrl}
+                          alt={s.name || `sign-${idx + 1}`}
+                          style={{ width: '100%', maxHeight: 360, objectFit: 'contain', borderRadius: 6, cursor: 'pointer' }}
+                          onClick={() => openImagePopup(s.annotatedImageUrl || s.originalImageUrl)}
+                        />
+                      ) : (
+                        <Typography color="text.secondary">No image</Typography>
+                      )}
+                      {s.description && (
+                        <Typography variant="body2" sx={{ mt: 1.0, whiteSpace: 'pre-wrap' }}>
+                          {s.description}
+                        </Typography>
+                      )}
+                    </Paper>
+                  </Grid>
+                ))}
+              </Grid>
             </Box>
-          </Box>
+          )}
+
+          {/* PLANS (PDF) */}
+          {!isSurvey && (
+            <Box mt={3}>
+              <Typography variant="h6">Plans (PDF)</Typography>
+              <Divider sx={{ mb: 1 }} />
+              {(!job.plans || job.plans.length === 0) && (
+                <Typography color="text.secondary">No plans uploaded.</Typography>
+              )}
+              <Box display="flex" flexDirection="column" gap={1} mt={1}>
+                {(job.plansRich && job.plansRich.length ? job.plansRich : (job.plans || []).map(u => ({ url: u }))).map((p, idx) => {
+                  const url = p.url || '';
+                  const label =
+                    p.name || p.title || (() => {
+                      try {
+                        const decoded = decodeURIComponent(url);
+                        const last = decoded.split('?')[0].split('/').pop();
+                        return last || `Plan ${idx + 1}`;
+                      } catch {
+                        return `Plan ${idx + 1}`;
+                      }
+                    })();
+
+                  return (
+                    <Button
+                      key={`${url}-${idx}`}
+                      variant="outlined"
+                      onClick={() => openPlan(p)}
+                      sx={{ justifyContent: 'flex-start' }}
+                      disabled={!url}
+                    >
+                      {label}
+                    </Button>
+                  );
+                })}
+              </Box>
+            </Box>
+          )}
+
+          {/* REFERENCE / COMPLETED PHOTOS (jobs only) */}
+          {!isSurvey && (
+            <>
+              <Box mt={3}>
+                <Typography variant="h6">Reference Photos</Typography>
+                <Divider sx={{ mb: 1 }} />
+                {(!job.referencePhotos || job.referencePhotos.length === 0) && (
+                  <Typography color="text.secondary">No reference photos.</Typography>
+                )}
+                <Grid container spacing={1}>
+                  {(job.referencePhotos || []).map((url, idx) => (
+                    <Grid item key={idx}>
+                      <img
+                        src={url}
+                        alt={`ref-${idx}`}
+                        style={{ width: 100, height: 100, objectFit: 'cover', cursor: 'pointer', borderRadius: 4 }}
+                        onClick={() => openImagePopup(url)}
+                      />
+                    </Grid>
+                  ))}
+                </Grid>
+              </Box>
+
+              <Box mt={3}>
+                <Typography variant="h6">Completed Photos</Typography>
+                <Divider sx={{ mb: 1 }} />
+                <Button variant="outlined" component="label" sx={{ mt: 1 }}>
+                  Upload Photos
+                  <input type="file" hidden accept="image/*" multiple onChange={handlePhotoUpload} />
+                </Button>
+                {(!job.completedPhotos || job.completedPhotos.length === 0) && (
+                  <Typography color="text.secondary" mt={1}>No completed photos yet.</Typography>
+                )}
+                <Grid container spacing={1} mt={1}>
+                  {(job.completedPhotos || []).map((url, idx) => (
+                    <Grid item key={idx}>
+                      <img
+                        src={url}
+                        alt={`completed-${idx}`}
+                        style={{ width: 100, height: 100, objectFit: 'cover', cursor: 'pointer', borderRadius: 4 }}
+                        onClick={() => openImagePopup(url)}
+                      />
+                    </Grid>
+                  ))}
+                </Grid>
+              </Box>
+            </>
+          )}
+
+          {/* SIGNATURE (jobs only) */}
+          {!isSurvey && (
+            <Box mt={3}>
+              <Typography variant="h6">Client Signature</Typography>
+              <Divider sx={{ mb: 1 }} />
+              {signatureURL ? (
+                <img
+                  src={signatureURL}
+                  alt="signature"
+                  style={{ border: '1px solid #ccc', height: 120, borderRadius: 4 }}
+                />
+              ) : (
+                <>
+                  <Box
+                    sx={{
+                      border: '1px solid #ccc',
+                      width: 320,
+                      height: 140,
+                      mb: 1,
+                      borderRadius: 1
+                    }}
+                  >
+                    <SignatureCanvas
+                      penColor="black"
+                      canvasProps={{ width: 320, height: 140, style: { display: 'block' } }}
+                      ref={ref => setSigPad(ref)}
+                    />
+                  </Box>
+                  <Button variant="outlined" onClick={handleSaveSignature}>Save Signature</Button>
+                </>
+              )}
+            </Box>
+          )}
+
+          {/* TIME TRACKING (jobs only) */}
+          {!isSurvey && (
+            <Box mt={3}>
+              <Typography variant="h6">Time Tracking</Typography>
+              <Divider sx={{ mb: 1 }} />
+              <Typography><strong>Your total:</strong> {userTotal} hrs</Typography>
+              <Typography><strong>Job total:</strong> {jobTotal} hrs</Typography>
+
+              {/* NEW: per-user breakdown */}
+              <Box mt={1} display="flex" gap={1} flexWrap="wrap">
+                {hoursByUserList.map(({ uid, hrs }) => (
+                  <Chip
+                    key={uid}
+                    size="small"
+                    label={`${getUserNameFromAny(uid, userMap)}: ${hrs} hrs`}
+                  />
+                ))}
+              </Box>
+
+              <Box mt={1} display="flex" alignItems="center" gap={2}>
+                <TextField
+                  label="Add Hours"
+                  type="number"
+                  value={hours}
+                  onChange={e => setHours(e.target.value)}
+                  sx={{ width: 160 }}
+                />
+                <Button variant="outlined" onClick={handleAddHours}>Submit</Button>
+              </Box>
+            </Box>
+          )}
 
           {/* ACTIONS */}
           <Box mt={4} display="flex" gap={2} flexWrap="wrap">
             <Button
               variant="contained"
               onClick={() => history.push(`/jobs/${jobId}/edit`)}
+              disabled={isSurvey}
+              title={isSurvey ? 'Convert to job to edit install details' : undefined}
             >
               Edit Job
+            </Button>
+
+            <Button
+              variant="outlined"
+              color="error"
+              onClick={handleDeleteJob}
+            >
+              Delete Job
             </Button>
 
             <Button variant="outlined" onClick={() => history.push('/')}>
               Back to List
             </Button>
 
-            {job.status === 'complete' ? (
-              <Button variant="outlined" color="warning" onClick={handleReopenJob}>
-                Reopen Job
-              </Button>
-            ) : (
-              <Button variant="outlined" color="success" onClick={handleCompleteJob}>
-                Complete Job
-              </Button>
+            {!isSurvey && (
+              job.status === 'complete' ? (
+                <Button variant="outlined" color="warning" onClick={handleReopenJob}>
+                  Reopen Job
+                </Button>
+              ) : (
+                <Button variant="outlined" color="success" onClick={handleCompleteJob}>
+                  Complete Job
+                </Button>
+              )
             )}
           </Box>
         </CardContent>
@@ -663,8 +801,43 @@ export default function JobDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* RESEND CONFIRMATION */}
-      <Dialog open={resendOpen} onClose={() => !resending && setResendOpen(false)}>
+      {/* CONVERT TO JOB DIALOG */}
+      <Dialog open={convertOpen} onClose={() => setConvertOpen(false)}>
+        <DialogTitle>Convert Survey to Job</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <Box sx={{ display: 'grid', gap: 2, mt: 1, width: 420, maxWidth: '90vw' }}>
+            <DatePicker
+              label="Install Date (optional)"
+              value={convertDate}
+              onChange={(v) => setConvertDate(v)}
+              slotProps={{ textField: { fullWidth: true } }}
+            />
+            <TextField
+              select
+              SelectProps={{ multiple: true, native: true }}
+              label="Assign Users (optional)"
+              value={assignSel.map(v => v.id)}
+              onChange={(e) => {
+                const ids = Array.from(e.target.selectedOptions).map(o => o.value);
+                const selected = userOptions.filter(u => ids.includes(u.id));
+                setAssignSel(selected);
+              }}
+              fullWidth
+            >
+              {userOptions.map(opt => (
+                <option key={opt.id} value={opt.id}>{opt.label}</option>
+              ))}
+            </TextField>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConvertOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={doConvert}>Convert</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* RESEND CONFIRMATION (jobs only UI entry) */}
+      <Dialog open={resendOpen} onClose={() => setResendOpen(false)}>
         <DialogTitle>Resend completion email?</DialogTitle>
         <DialogActions>
           <Button onClick={() => setResendOpen(false)} disabled={resending}>Cancel</Button>

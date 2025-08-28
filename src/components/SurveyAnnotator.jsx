@@ -130,6 +130,34 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     tr.nodes(node ? [node] : []); tr.getLayer()?.batchDraw();
   }, [selectedId, shapes]);
 
+  // ---- SAVE (debounced) ----
+  const saveTimer = useRef(null);
+  const doSave = useCallback(async () => {
+    if (!onSave || !stageRef.current) return;
+    const stage = stageRef.current;
+    const stageJSON = stage.toJSON();
+    const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
+    onSave({ stageJSON: JSON.parse(stageJSON), annotatedBlob: blob });
+  }, [onSave]);
+
+  const debouncedSave = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    // small delay so rapid edits consolidate to one save
+    saveTimer.current = setTimeout(() => {
+      doSave();
+    }, 500);
+  }, [doSave]);
+
+  // Auto-save whenever shapes change AND we're not mid-stroke
+  useEffect(() => {
+    if (!imgLoaded) return;
+    if (isDrawing) return; // wait until pointer up
+    if (!shapes) return;
+    // Don’t auto-save immediately on first load with no shapes.
+    // Save only if at least one shape exists OR shapes changed after first draw.
+    debouncedSave();
+  }, [shapes, isDrawing, imgLoaded, debouncedSave]);
+
   const startShape = useCallback((pos) => {
     const id = uuid();
     if (tool === 'arrow') {
@@ -195,10 +223,17 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     });
   };
 
-  const handlePointerUp = () => { setIsDrawing(false); setStartPt(null); };
+  const handlePointerUp = () => {
+    setIsDrawing(false);
+    setStartPt(null);
+    // auto-save after finishing a stroke
+    debouncedSave();
+  };
 
   const updateSelected = (patch) => {
     setShapes((arr) => arr.map((s) => (s.id === selectedId ? { ...s, ...patch } : s)));
+    // auto-save when properties change
+    debouncedSave();
   };
 
   const onTransformEnd = (e, shape) => {
@@ -214,6 +249,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     } else if (shape.type === 'text') {
       updateSelected({ x: node.x(), y: node.y() });
     }
+    // updateSelected already debounces save
   };
 
   const Anchor = ({ x, y, onDragMove, onMouseDown }) => (
@@ -229,7 +265,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         onDragMove({ x: pos.x, y: pos.y });
       }}
       onDragStart={(e) => { e.cancelBubble = true; }}
-      onDragEnd={(e) => { e.cancelBubble = true; }}
+      onDragEnd={(e) => { e.cancelBubble = true; debouncedSave(); }}
     />
   );
 
@@ -262,6 +298,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           onMouseDown={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
           onClick={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
           onTap={() => setSelectedId(s.id)}
+          onDragEnd={() => debouncedSave()}
         />
 
         {/* Measurement bubble */}
@@ -277,6 +314,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
             setShapes((arr) => arr.map((sh) => (
               sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh
             )));
+            debouncedSave();
           }}
         >
           {(selectedId === s.id || s.measure == null) && (
@@ -309,14 +347,11 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     );
   };
 
-  const save = async () => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const stageJSON = stage.toJSON();
-    const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
-    onSave?.({ stageJSON: JSON.parse(stageJSON), annotatedBlob: blob });
-    alert('Annotation saved for this sign.');
-  };
+  const saveNow = useCallback(() => {
+    // Immediate save when pressing the button
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    doSave();
+  }, [doSave]);
 
   const selectedShape = shapes.find((s) => s.id === selectedId);
 
@@ -386,8 +421,9 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           />
         )}
 
-        <Button size="small" variant="outlined" onClick={save} sx={{ ml: 'auto' }}>
-          Save Annotation
+        {/* Manual save is optional now */}
+        <Button size="small" variant="outlined" onClick={saveNow} sx={{ ml: 'auto' }}>
+          Save Now
         </Button>
       </Box>
 
@@ -443,7 +479,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                       opacity={s.fillOpacity ?? 0.15}  // glassy translucency
                       onClick={() => setSelectedId(s.id)}
                       onTap={() => setSelectedId(s.id)}
-                      onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
+                      onDragEnd={(e) => { updateSelected({ x: e.target.x(), y: e.target.y() }); debouncedSave(); }}
                       onTransformEnd={(e) => onTransformEnd(e, s)}
                     />
                     {s.text && (
@@ -471,7 +507,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                     fontSize={s.fontSize} fill={s.color} draggable
                     onClick={() => setSelectedId(s.id)}
                     onTap={() => setSelectedId(s.id)}
-                    onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
+                    onDragEnd={(e) => { updateSelected({ x: e.target.x(), y: e.target.y() }); debouncedSave(); }}
                     onTransformEnd={(e) => onTransformEnd(e, s)}
                   />
                 );
@@ -517,12 +553,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                 value={selectedShape.color || '#ff4d4d'}
                 onChange={(e) => {
                   const v = e.target.value;
-                  if (selectedShape.type === 'rect') {
-                    // sync border + fill
-                    updateSelected({ color: v });
-                  } else {
-                    updateSelected({ color: v });
-                  }
+                  updateSelected({ color: v });
                 }}
                 style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }}
               />
@@ -583,6 +614,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
               onClick={() => {
                 setShapes((s) => s.filter((x) => x.id !== selectedId));
                 setSelectedId(null);
+                debouncedSave();
               }}
             >
               Delete
