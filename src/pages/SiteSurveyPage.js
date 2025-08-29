@@ -1,5 +1,5 @@
 // src/pages/SiteSurveyPage.js
-import React, { useState, lazy, Suspense } from 'react';
+import React, { useState, lazy, Suspense, useEffect } from 'react';
 import {
   Box,
   Button,
@@ -7,22 +7,17 @@ import {
   TextField,
   Typography,
   CircularProgress,
+  Grid,
+  IconButton,
+  Tooltip,
+  Paper,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { v4 as uuid } from 'uuid';
+import DeleteIcon from '@mui/icons-material/Delete';
 import ErrorBoundary from '../components/ErrorBoundary';
-
-// Firebase
-import { db, storage } from '../firebase/firebase';
-import {
-  addDoc,
-  collection,
-  serverTimestamp,
-  updateDoc,
-  doc,
-} from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { createSurvey } from '../services/surveyService';
 
 const SurveyAnnotator = lazy(() => import('../components/SurveyAnnotator'));
 
@@ -75,10 +70,12 @@ export default function SiteSurveyPage() {
 
   const [client, setClient] = useState({
     name: '',
+    company: '',
     contact: '',
     phone: '',
     email: '',
     address: '',
+    description: '',
   });
 
   const [signs, setSigns] = useState([
@@ -86,13 +83,48 @@ export default function SiteSurveyPage() {
       id: uuid(),
       name: 'Sign 1',
       description: '',
-      fileOriginal: null,   // untouched original File
-      previewUrl: null,     // downscaled data URL for annotation display
-      previewBlob: null,    // Blob of preview (optional)
-      stageJSON: null,      // Konva JSON
-      annotatedBlob: null,  // Blob (PNG/JPEG) of annotation result
+      fileOriginal: null,   // untouched original
+      previewUrl: null,     // downscaled for annotation
+      previewBlob: null,
+      stageJSON: null,
+      annotatedBlob: null,
     },
   ]);
+
+  // plain reference photos (no annotations)
+  const [refPhotos, setRefPhotos] = useState([]); // [{ id, file, url }]
+  const addRefPhotos = (files) => {
+    const incoming = Array.from(files || []).map((f) => ({
+      id: uuid(),
+      file: f,
+      url: URL.createObjectURL(f),
+    }));
+    setRefPhotos((prev) => [...prev, ...incoming]);
+  };
+  const removeRefPhoto = (id) => {
+    setRefPhotos((prev) => {
+      const toRevoke = prev.find((p) => p.id === id);
+      if (toRevoke?.url?.startsWith('blob:')) URL.revokeObjectURL(toRevoke.url);
+      return prev.filter((p) => p.id !== id);
+    });
+  };
+
+  // ❌ REMOVE the effect that depends on [signs, refPhotos]
+
+// ✅ Only revoke on unmount to avoid killing in-use previews
+useEffect(() => {
+  return () => {
+    // revoke sign previews
+    signs.forEach((s) => {
+      if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl);
+    });
+    // revoke ref photo previews
+    refPhotos.forEach((p) => {
+      if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url);
+    });
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []); // <-- run once; cleanup on unmount only
 
   const addSign = () =>
     setSigns((s) => [
@@ -150,80 +182,36 @@ export default function SiteSurveyPage() {
     setSigns(next);
   };
 
-  // ---- Save as SURVEY (Option A) ----
-  const saveSurvey = async () => {
+  const onSaveSurvey = async () => {
+    // quick validation: must have at least client + one sign image OR at least one ref photo
+    const anySignImage = signs.some((s) => s.fileOriginal);
+    if (!anySignImage && refPhotos.length === 0) {
+      alert('Please add at least one sign image or a reference photo.');
+      return;
+    }
+
+    setSaving(true);
     try {
-      setSaving(true);
-
-      // Build a simple surveyNotes list from non-empty sign descriptions
-      const surveyNotes = signs
-        .map(s => (s.description || '').trim())
-        .filter(Boolean);
-
-      // 1) Create a minimal survey doc first to get an ID
-      const surveyRef = await addDoc(collection(db, 'jobs'), {
-        jobType: 'survey',          // <-- key flag
-        status: 'survey',           // keeps it out of scheduling until converted
-        createdAt: serverTimestamp(),
-
-        // Client fields
-        clientName: client.name || '',
-        company: '',                // you can add a field in the UI later if needed
-        contact: client.contact || '',
-        phone: client.phone || '',
-        email: client.email || '',
-        address: client.address || '',
-
-        description: '',            // keep empty or populate from a top-level survey note field if you add one later
-        surveyNotes,                // array of strings (Sign descriptions)
-        assignedTo: [],             // surveys aren’t assigned yet
-        installDate: null,          // set when converting
-
-        // placeholder; we will update with real sign URLs after upload
-        signs: [],
+      const newId = await createSurvey({
+        client,
+        signs,
+        referencePhotoFiles: refPhotos.map((p) => p.file),
       });
 
-      const docId = surveyRef.id;
-
-      // 2) Upload each sign's original + annotated image (if present)
-      const uploadedSigns = [];
-      for (let i = 0; i < signs.length; i++) {
-        const s = signs[i];
-        let originalUrl = null;
-        let annotatedUrl = null;
-
-        if (s.fileOriginal) {
-          const origRef = ref(storage, `jobs/${docId}/survey/sign_${i + 1}_original.jpg`);
-          await uploadBytes(origRef, s.fileOriginal);
-          originalUrl = await getDownloadURL(origRef);
-        }
-
-        if (s.annotatedBlob) {
-          const annRef = ref(storage, `jobs/${docId}/survey/sign_${i + 1}_annotated.jpg`);
-          await uploadBytes(annRef, s.annotatedBlob);
-          annotatedUrl = await getDownloadURL(annRef);
-        }
-
-        uploadedSigns.push({
-          id: s.id,
-          name: s.name,
-          description: s.description || '',
-          originalImageUrl: originalUrl,
-          annotatedImageUrl: annotatedUrl,
-          // if you want to keep the stage JSON for future editing:
-          stageJSON: s.stageJSON || null,
-        });
-      }
-
-      // 3) Update doc with the uploaded signs array
-      await updateDoc(doc(db, 'jobs', docId), {
-        signs: uploadedSigns,
+      // cleanup blob URLs
+      signs.forEach((s) => {
+        if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl);
+      });
+      refPhotos.forEach((p) => {
+        if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url);
       });
 
-      alert('Survey saved 👍\nYou can find it in the list under the “Surveys” tab.');
-    } catch (err) {
-      console.error('Save survey failed:', err);
-      alert(err?.message || 'Failed to save survey.');
+      alert('Survey saved.');
+      // redirect to the new survey detail
+      window.location.assign(`/jobs/${newId}`);
+    } catch (e) {
+      console.error(e);
+      alert(e?.message || 'Failed to save survey.');
     } finally {
       setSaving(false);
     }
@@ -252,25 +240,41 @@ export default function SiteSurveyPage() {
         {/* Job details */}
         <Divider sx={{ my: 1, borderColor: 'rgba(255,255,255,0.2)' }} />
         <Box sx={{ display: 'grid', gap: 1.25 }}>
-          {['Client', 'Contact Person', 'Contact Phone', 'Contact Email', 'Site Address'].map(
-            (label, idx) => {
-              const keys = ['name', 'contact', 'phone', 'email', 'address'];
-              return (
-                <TextField
-                  key={label}
-                  size={isMobile ? 'small' : 'medium'}
-                  label={label}
-                  value={client[keys[idx]]}
-                  onChange={(e) => setClient({ ...client, [keys[idx]]: e.target.value })}
-                  fullWidth
-                  InputLabelProps={{ style: { color: 'white' } }}
-                  InputProps={{
-                    style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
-                  }}
-                />
-              );
-            }
-          )}
+          {[
+            { label: 'Client', key: 'name' },
+            { label: 'Company', key: 'company' },
+            { label: 'Contact Person', key: 'contact' },
+            { label: 'Contact Phone', key: 'phone' },
+            { label: 'Contact Email', key: 'email' },
+            { label: 'Site Address', key: 'address' },
+          ].map(({ label, key }) => (
+            <TextField
+              key={key}
+              size={isMobile ? 'small' : 'medium'}
+              label={label}
+              value={client[key]}
+              onChange={(e) => setClient({ ...client, [key]: e.target.value })}
+              fullWidth
+              InputLabelProps={{ style: { color: 'white' } }}
+              InputProps={{
+                style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
+              }}
+            />
+          ))}
+
+          <TextField
+            multiline
+            minRows={2}
+            size={isMobile ? 'small' : 'medium'}
+            label="Survey Notes / Description (optional)"
+            value={client.description}
+            onChange={(e) => setClient({ ...client, description: e.target.value })}
+            fullWidth
+            InputLabelProps={{ style: { color: 'white' } }}
+            InputProps={{
+              style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
+            }}
+          />
         </Box>
 
         {/* Sign sections */}
@@ -359,11 +363,69 @@ export default function SiteSurveyPage() {
           </Button>
         </Box>
 
+        {/* Reference photos (no annotations) */}
+        <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.2)' }} />
+        <Typography variant="h6" sx={{ color: 'white', mb: 1 }}>
+          Additional Reference Photos (no annotations)
+        </Typography>
+
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center', mb: 1 }}>
+          <Button variant="outlined" component="label" sx={{ color: 'white', borderColor: 'white' }}>
+            Upload Reference Photos
+            <input
+              hidden
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => {
+                const files = e.target.files;
+                if (files?.length) addRefPhotos(files);
+                e.target.value = '';
+              }}
+            />
+          </Button>
+          <Typography variant="body2" sx={{ opacity: 0.8 }}>
+            You can add site/context images here. These will be saved with the survey but won’t have annotations.
+          </Typography>
+        </Box>
+
+        {refPhotos.length > 0 && (
+          <Grid container spacing={1} sx={{ mb: 2 }}>
+            {refPhotos.map((p) => (
+              <Grid item key={p.id}>
+                <Paper
+                  sx={{
+                    p: 0.5,
+                    borderRadius: 1,
+                    bgcolor: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 0.5,
+                  }}
+                >
+                  <img
+                    src={p.url}
+                    alt="ref"
+                    style={{ width: 110, height: 110, objectFit: 'cover', borderRadius: 4 }}
+                  />
+                  <Tooltip title="Remove photo">
+                    <IconButton size="small" sx={{ color: '#fff' }} onClick={() => removeRefPhoto(p.id)}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Paper>
+              </Grid>
+            ))}
+          </Grid>
+        )}
+
         <Box sx={{ display: 'flex', gap: 1, flexDirection: isMobile ? 'column' : 'row' }}>
           <Button
             fullWidth={isMobile}
             variant="contained"
-            onClick={saveSurvey}
+            onClick={onSaveSurvey}
             disabled={saving}
           >
             {saving ? 'Saving…' : 'Save Survey'}
