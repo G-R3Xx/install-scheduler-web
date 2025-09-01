@@ -264,6 +264,60 @@ exports.testSendgridMail = onRequest(
   }
 );
 
+// ---------- Email a Survey PDF (client-generated) ----------
+exports.sendSurveyPdf = onRequest(
+  { secrets: [SENDGRID_API_KEY] },
+  async (req, res) => {
+    // Basic CORS (adjust origin as needed)
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') return res.status(204).send('');
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Use POST' });
+    }
+
+    try {
+      const { toEmail, subject, text, pdfBase64, fileName } = req.body || {};
+      if (!toEmail || !pdfBase64) {
+        return res.status(400).json({ error: 'toEmail and pdfBase64 are required' });
+      }
+
+      // Configure SendGrid with your secret
+      sgMail.setApiKey(SENDGRID_API_KEY.value());
+
+      // From + optional default To via env (like your other endpoints)
+      const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
+
+      await sgMail.send({
+        to: toEmail,
+        from: fromAddress,
+        subject: subject || 'Site Survey PDF',
+        text: text || 'Attached is the generated Site Survey PDF.',
+        attachments: [
+          {
+            content: pdfBase64,            // base64 (no data: prefix)
+            filename: fileName || 'survey.pdf',
+            type: 'application/pdf',
+            disposition: 'attachment',
+          },
+        ],
+      });
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error('❌ sendSurveyPdf failed', {
+        message: err?.message, code: err?.code, body: err?.response?.body
+      });
+      const details = err?.response?.body?.errors?.map(e => e.message).join('; ')
+        || err?.message || 'Unknown error';
+      return res.status(500).json({ error: details });
+    }
+  }
+);
+
+
 // ---------- Manual resend endpoint ----------
 // GET .../resendCompletionEmail?jobId=ABC&to=me@x.com&force=true
 exports.resendCompletionEmail = onRequest(
