@@ -1,17 +1,8 @@
 // src/pages/SiteSurveyPage.js
-import React, { useState, lazy, Suspense } from 'react';
+import React, { useState, lazy, Suspense, useRef } from 'react';
 import {
-  Box,
-  Button,
-  Divider,
-  TextField,
-  Typography,
-  CircularProgress,
-  Grid,
-  IconButton,
-  Tooltip,
-  Paper,
-  Backdrop,
+  Box, Button, Divider, TextField, Typography, CircularProgress,
+  Grid, IconButton, Tooltip, Paper, Backdrop,
 } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
@@ -19,7 +10,6 @@ import { v4 as uuid } from 'uuid';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { createSurvey } from '../services/surveyService';
-import { jsPDF } from 'jspdf';
 import { useHistory } from 'react-router-dom';
 
 const SurveyAnnotator = lazy(() => import('../components/SurveyAnnotator'));
@@ -28,11 +18,7 @@ const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE ||
   'https://us-central1-install-scheduler.cloudfunctions.net';
 
-// Fixed recipient
-const SURVEY_PDF_TO = 'printroom@tenderedge.com.au';
-
-/* Busy overlay */
-function BusyOverlay({ open, text = 'Working…' }) {
+function BusyOverlay({ open, text = "Saving survey… uploading photos" }) {
   return (
     <Backdrop open={open} sx={{ zIndex: 2000, color: '#fff' }}>
       <Box sx={{ display: 'grid', justifyItems: 'center', gap: 1.5 }}>
@@ -46,18 +32,13 @@ function BusyOverlay({ open, text = 'Working…' }) {
   );
 }
 
-/* Utils */
-async function blobToDataURL(blob) {
-  return await new Promise((resolve, reject) => {
+async function makePreviewImage(file, { maxDim = 2048, quality = 0.8 } = {}) {
+  const dataURL = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    reader.readAsDataURL(file);
   });
-}
-
-async function makePreviewImage(file, { maxDim = 2048, quality = 0.8 } = {}) {
-  const dataURL = await blobToDataURL(file);
 
   const img = await new Promise((resolve, reject) => {
     const image = new Image();
@@ -90,213 +71,34 @@ async function makePreviewImage(file, { maxDim = 2048, quality = 0.8 } = {}) {
   };
 }
 
-/* Styled PDF that keeps each sign block together on a single page */
-const buildSurveyPdfBase64 = async (client, signs, refPhotos) => {
-  const pdf = new jsPDF({ unit: 'pt', format: 'a4' });
-  const pageW = pdf.internal.pageSize.getWidth();
-  const pageH = pdf.internal.pageSize.getHeight();
-
-  // Layout constants
-  const margin = 40;
-  const contentW = pageW - margin * 2;
-  let y = margin + 16;
-
-  const colorPrimary = [0, 74, 173]; // a deep blue
-  const colorBand = [16, 23, 42];
-
-  const addHeader = () => {
-    pdf.setFillColor(...colorBand);
-    pdf.rect(0, 0, pageW, 48, 'F');
-    pdf.setTextColor(255, 255, 255);
-    pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(16);
-    pdf.text('SITE SURVEY', margin, 30);
-    pdf.setTextColor(0, 0, 0);
-  };
-
-  const hr = () => {
-    pdf.setDrawColor(220);
-    pdf.line(margin, y, pageW - margin, y);
-    y += 10;
-  };
-
-  const sectionTitle = (t) => {
-    pdf.setFont('helvetica', 'bold');
-    pdf.setTextColor(...colorPrimary);
-    pdf.setFontSize(13);
-    pdf.text(t, margin, y);
-    y += 14;
-    pdf.setTextColor(0, 0, 0);
-    hr();
-  };
-
-  const ensureSpace = (needed) => {
-    if (y + needed > pageH - margin) {
-      pdf.addPage();
-      addHeader();
-      y = margin + 16;
-    }
-  };
-
-  const line = (label, value = '') => {
-    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(11);
-    const leftW = 110;
-    const labelY = y;
-    pdf.text(`${label}:`, margin, y);
-    pdf.setFont('helvetica', 'normal');
-    const wrapped = pdf.splitTextToSize(String(value ?? ''), contentW - leftW);
-    pdf.text(wrapped, margin + leftW, y);
-    const blockH = Math.max(16, 12 * wrapped.length);
-    y = labelY + blockH;
-  };
-
-  addHeader();
-
-  // Client details
-  sectionTitle('Client Details');
-  line('Client', client.name || '');
-  line('Company', client.company || '');
-  line('Contact', client.contact || '');
-  line('Phone', client.phone || '');
-  line('Email', client.email || '');
-  line('Address', client.address || '');
-
-  // Notes
-  sectionTitle('Notes');
-  pdf.setFont('helvetica', 'normal');
-  const notes = (client.description || '').toString().trim() || '—';
-  const noteLines = pdf.splitTextToSize(notes, contentW);
-  ensureSpace(12 * noteLines.length + 6);
-  pdf.text(noteLines, margin, y);
-  y += 12 * noteLines.length + 10;
-
-  // Helper to compute image scaled size to contentW
-  const imageDimsFor = (img) => {
-    const scale = Math.min(1, contentW / img.width);
-    return { w: img.width * scale, h: img.height * scale };
-  };
-
-  // Signs
-  sectionTitle('Signs');
-  for (let i = 0; i < signs.length; i++) {
-    const s = signs[i];
-    if (!s.fileOriginal && !s.previewBlob && !s.annotatedBlob) continue;
-
-    // Prepare description lines
-    const title = s.name || `Sign ${i + 1}`;
-    const descLines = s.description ? pdf.splitTextToSize(s.description, contentW) : [];
-    const descH = descLines.length ? 12 * descLines.length + 6 : 0;
-
-    // Prepare image (we must know size before deciding page break)
-    let dataURL = null;
-    if (s.annotatedBlob) dataURL = await blobToDataURL(s.annotatedBlob);
-    else if (s.previewBlob) dataURL = await blobToDataURL(s.previewBlob);
-    else if (s.fileOriginal) dataURL = await blobToDataURL(s.fileOriginal);
-
-    let imgH = 0;
-    if (dataURL) {
-      const img = new Image();
-      img.src = dataURL;
-      await new Promise((r) => (img.onload = r));
-      imgH = imageDimsFor(img).h;
-    }
-
-    // Total block height (title + (desc?) + image + spacing + divider)
-    const titleH = 16;
-    const blockH = titleH + descH + (imgH ? imgH + 8 : 0) + 8 + 10; // 10 for hr
-
-    // Keep this sign together: page break first if needed
-    ensureSpace(blockH);
-
-    // Render sign block
-    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(12);
-    pdf.text(title, margin, y); y += 16;
-
-    if (descLines.length) {
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(11);
-      pdf.text(descLines, margin, y);
-      y += 12 * descLines.length + 6;
-    }
-
-    if (dataURL) {
-      const img = new Image(); img.src = dataURL;
-      await new Promise((r) => (img.onload = r));
-      const { w, h } = imageDimsFor(img);
-      pdf.addImage(
-        dataURL,
-        dataURL.startsWith('data:image/png') ? 'PNG' : 'JPEG',
-        margin, y, w, h
-      );
-      y += h + 8;
-    }
-
-    hr();
-  }
-
-  // Reference photos
-  if (refPhotos.length) {
-    sectionTitle('Reference Photos');
-    for (const p of refPhotos) {
-      const dataURL = await blobToDataURL(p.file);
-      const img = new Image(); img.src = dataURL;
-      await new Promise((r) => (img.onload = r));
-      const { w, h } = imageDimsFor(img);
-
-      ensureSpace(h + 10);
-      pdf.addImage(
-        dataURL,
-        dataURL.startsWith('data:image/png') ? 'PNG' : 'JPEG',
-        margin, y, w, h
-      );
-      y += h + 8;
-    }
-  }
-
-  // Footer line
-  ensureSpace(20);
-  pdf.setDrawColor(220);
-  pdf.line(margin, pageH - margin, pageW - margin, pageH - margin);
-  pdf.setFont('helvetica', 'italic'); pdf.setFontSize(9);
-  pdf.text('Generated by Install Scheduler', margin, pageH - margin + 14);
-
-  const dataUri = pdf.output('datauristring');
-  return dataUri.split(',')[1];
-};
-
 export default function SiteSurveyPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const history = useHistory();
 
   const [busy, setBusy] = useState(false);
-  const [busyText, setBusyText] = useState('Working…');
   const [saving, setSaving] = useState(false);
 
   const [client, setClient] = useState({
-    name: '',
-    company: '',
-    contact: '',
-    phone: '',
-    email: '',
-    address: '',
-    description: '',
+    name: '', company: '', contact: '', phone: '', email: '', address: '', description: '',
   });
 
-  const [signs, setSigns] = useState([
-    {
-      id: uuid(),
-      name: 'Sign 1',
-      description: '',
-      fileOriginal: null,
-      previewUrl: null,
-      previewBlob: null,
-      stageJSON: null,
-      annotatedBlob: null,
-    },
-  ]);
+  const [signs, setSigns] = useState([{
+    id: uuid(),
+    name: 'Sign 1',
+    description: '',
+    fileOriginal: null,
+    previewUrl: null,
+    previewBlob: null,
+    stageJSON: null,
+    annotatedBlob: null,
+  }]);
 
-  const [refPhotos, setRefPhotos] = useState([]);
+  // annotator refs by signId
+  const annotRefs = useRef({}); // { [signId]: annotatorRef }
 
+  // reference photos (no annotations)
+  const [refPhotos, setRefPhotos] = useState([]); // [{ id, file, url }]
   const addRefPhotos = (files) => {
     const incoming = Array.from(files || []).map((f) => ({
       id: uuid(),
@@ -369,7 +171,7 @@ export default function SiteSurveyPage() {
   };
 
   const onSaveSurvey = async () => {
-    const anySignImage = signs.some((s) => s.fileOriginal);
+    const anySignImage = signs.some(s => s.fileOriginal);
     if (!anySignImage && refPhotos.length === 0) {
       alert('Please add at least one sign image or a reference photo.');
       return;
@@ -377,68 +179,62 @@ export default function SiteSurveyPage() {
 
     setSaving(true);
     setBusy(true);
-    setBusyText('Saving survey…');
-
     try {
-      // 1) Save to Firestore / Storage
-      await createSurvey({
+      // 1) Collect annotation snapshots for each sign that has a preview (if user didn't click "Save Annotation")
+      const signsWithSnaps = await Promise.all(signs.map(async (s) => {
+        const ref = annotRefs.current[s.id];
+        if (ref && ref.exportSnapshot && s.previewUrl) {
+          try {
+            const snap = await ref.exportSnapshot();
+            return { ...s, stageJSON: snap.stageJSON, annotatedBlob: snap.annotatedBlob };
+          } catch {
+            return s; // keep as-is if export fails
+          }
+        }
+        return s;
+      }));
+
+      // 2) Save survey (uploads originals, annotated images, and reference photos)
+      const surveyId = await createSurvey({
         client,
-        signs,
-        referencePhotoFiles: refPhotos.map((p) => p.file),
+        signs: signsWithSnaps,
+        referencePhotoFiles: refPhotos.map(p => p.file),
       });
 
-      // 2) Build PDF
-      setBusyText('Building PDF…');
-      const pdfBase64 = await buildSurveyPdfBase64(client, signs, refPhotos);
-
-      // 3) Email PDF (always to SURVEY_PDF_TO)
-      setBusyText('Emailing PDF…');
+      // 3) Fire the send-email function (ignore error but log it)
       try {
-        const subject = `Site Survey — ${client.name || client.company || 'Untitled'}`;
-        const text = `Auto-generated site survey PDF for ${client.name || client.company || 'the client'}.`;
-        const fileName = `Survey_${(client.name || client.company || 'client').replace(/\s+/g, '_')}.pdf`;
-
         const resp = await fetch(`${FUNCTIONS_BASE}/sendSurveyPdf`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           mode: 'cors',
-          body: JSON.stringify({
-            toEmail: SURVEY_PDF_TO,
-            subject,
-            text,
-            pdfBase64,
-            fileName,
-          }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ surveyId }),
         });
         if (!resp.ok) {
-          const txt = await resp.text().catch(() => '');
-          console.error('sendSurveyPdf non-2xx', resp.status, txt);
+          const text = await resp.text();
+          console.warn('sendSurveyPdf failed:', text || resp.status);
         }
-      } catch (e) {
-        console.error('Email send failed', e);
-        // We still continue to redirect; survey is saved
+      } catch (err) {
+        console.warn('sendSurveyPdf error:', err);
       }
 
-      // Cleanup local blobs
-      signs.forEach((s) => { if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl); });
-      refPhotos.forEach((p) => { if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url); });
+      // 4) Cleanup local blobs
+      signs.forEach(s => { if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl); });
+      refPhotos.forEach(p => { if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url); });
 
-      // Redirect to job list
+      // 5) Redirect to job list
       history.push('/');
-      return;
     } catch (e) {
       console.error(e);
       alert(e?.message || 'Failed to save survey.');
     } finally {
       setSaving(false);
       setBusy(false);
-      setBusyText('Working…');
     }
   };
 
   return (
     <Box sx={{ p: isMobile ? 1 : 2, bgcolor: '#0f172a', minHeight: '100vh' }}>
-      <BusyOverlay open={busy} text={busyText} />
+      <BusyOverlay open={busy} text="Saving survey… uploading photos" />
 
       <Box
         sx={{
@@ -491,12 +287,11 @@ export default function SiteSurveyPage() {
             fullWidth
             InputLabelProps={{ style: { color: 'white' } }}
             InputProps={{
-                style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
+              style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
             }}
           />
         </Box>
 
-        {/* Signs */}
         <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.2)' }} />
 
         {signs.map((s, i) => (
@@ -546,13 +341,22 @@ export default function SiteSurveyPage() {
               <ErrorBoundary>
                 <Suspense
                   fallback={
-                    <Box sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 1, color: 'white' }}>
+                    <Box
+                      sx={{
+                        p: 2,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 1,
+                        color: 'white',
+                      }}
+                    >
                       <CircularProgress size={18} sx={{ color: 'white' }} />
                       Loading annotation tool…
                     </Box>
                   }
                 >
                   <SurveyAnnotator
+                    ref={(r) => { annotRefs.current[s.id] = r; }}
                     file={s.previewUrl}
                     tools={['text', 'rect', 'arrow']}
                     onSave={(payload) => onAnnotSave(i, payload)}
@@ -575,7 +379,7 @@ export default function SiteSurveyPage() {
           </Button>
         </Box>
 
-        {/* Reference photos (no annotations) */}
+        {/* Reference photos */}
         <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.2)' }} />
         <Typography variant="h6" sx={{ color: 'white', mb: 1 }}>
           Additional Reference Photos (no annotations)

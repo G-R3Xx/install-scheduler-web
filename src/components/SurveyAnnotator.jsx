@@ -1,13 +1,9 @@
 // src/components/SurveyAnnotator.jsx
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, {
+  useEffect, useMemo, useRef, useState, useCallback, forwardRef, useImperativeHandle
+} from 'react';
 import {
-  Box,
-  Button,
-  ToggleButton,
-  ToggleButtonGroup,
-  TextField,
-  IconButton,
-  Paper,
+  Box, Button, ToggleButton, ToggleButtonGroup, TextField, IconButton, Paper,
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import {
@@ -68,7 +64,7 @@ function useLoadedImage(fileOrUrl) {
 
 const midPoint = (pts) => ({ x: (pts[0] + pts[2]) / 2, y: (pts[1] + pts[3]) / 2 });
 
-export default function SurveyAnnotator({ file, tools = [], onSave }) {
+const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], onSave }, ref) {
   const stageRef = useRef(null);
   const trRef = useRef(null);
   const containerRef = useRef(null);
@@ -89,8 +85,8 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   const [startPt, setStartPt] = useState(null);
   const [stageSize, setStageSize] = useState({ w: 900, h: 600 });
 
+  // start closed; open only when clicking an annotation
   const [propsOpen, setPropsOpen] = useState(false);
-  useEffect(() => { setPropsOpen(!!selectedId); }, [selectedId]);
 
   // Fit stage
   useEffect(() => {
@@ -104,7 +100,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
   }, [imgLoaded, bgImage, containerSize.width]);
 
   // Reset when new image chosen
-  useEffect(() => { setShapes([]); setSelectedId(null); }, [file]);
+  useEffect(() => { setShapes([]); setSelectedId(null); setPropsOpen(false); }, [file]);
 
   // Delete key
   useEffect(() => {
@@ -113,6 +109,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
       if (e.key === 'Delete' || e.key === 'Backspace') {
         setShapes((s) => s.filter((x) => x.id !== selectedId));
         setSelectedId(null);
+        setPropsOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -159,9 +156,15 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
 
     if (!clickedOnEmpty) {
       const id = e.target.id?.();
-      if (id) setSelectedId(id);
+      if (id) {
+        setSelectedId(id);
+        setPropsOpen(true);
+      }
       return;
     }
+
+    setSelectedId(null);
+    setPropsOpen(false);
     if (!bgImage) return;
 
     const pos = stage.getPointerPosition();
@@ -194,7 +197,10 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
     });
   };
 
-  const handlePointerUp = () => { setIsDrawing(false); setStartPt(null); };
+  const handlePointerUp = () => {
+    setIsDrawing(false);
+    setStartPt(null);
+  };
 
   const updateSelected = (patch) => {
     setShapes((arr) => arr.map((s) => (s.id === selectedId ? { ...s, ...patch } : s)));
@@ -246,6 +252,15 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
       }));
     };
 
+    const promptForMeasure = () => {
+      const v = window.prompt('Enter measurement (mm):', s.measure != null ? String(s.measure) : '');
+      if (v == null) return;
+      const n = Number(v);
+      setShapes(arr =>
+        arr.map(sh => (sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh))
+      );
+    };
+
     return (
       <>
         <Arrow
@@ -258,27 +273,25 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           pointerWidth={isSmallScreen ? 16 : 12}
           pointerAtBeginning
           hitStrokeWidth={isSmallScreen ? 30 : 20}
-          onMouseDown={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
-          onClick={(e) => { e.cancelBubble = true; setSelectedId(s.id); }}
-          onTap={() => setSelectedId(s.id)}
+          onMouseDown={(e) => { e.cancelBubble = true; }}
+          onClick={(e) => {
+            e.cancelBubble = true;
+            setSelectedId(s.id);
+            if (s.measure == null) promptForMeasure();
+          }}
+          onDblClick={(e) => {
+            e.cancelBubble = true;
+            setSelectedId(s.id);
+            promptForMeasure();
+          }}
+          onTap={() => {
+            setSelectedId(s.id);
+            if (s.measure == null) promptForMeasure();
+          }}
         />
 
-        {/* Measurement bubble — show ONLY when no measurement yet */}
-        {s.measure == null && (
-          <Group
-            x={mid.x}
-            y={mid.y}
-            onMouseDown={(e) => { e.cancelBubble = true; }}
-            onClick={(e) => {
-              e.cancelBubble = true;
-              const v = window.prompt('Enter measurement (mm):', '');
-              if (v == null) return;
-              const n = Number(v);
-              setShapes((arr) => arr.map((sh) => (
-                sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh
-              )));
-            }}
-          >
+        {(selectedId === s.id && s.measure == null) && (
+          <Group x={mid.x} y={mid.y} onMouseDown={(e) => { e.cancelBubble = true; }}>
             <Label offsetX={14} offsetY={14}>
               <Tag fill="rgba(0,0,0,0.55)" stroke="#fff" cornerRadius={14} />
               <KText text="?" fontSize={14} fill="#fff" padding={6} />
@@ -300,29 +313,47 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
 
         {selectedId === s.id && (
           <>
-            <Anchor x={x1} y={y1} onMouseDown={() => setSelectedId(s.id)} onDragMove={({ x, y }) => setEnd('start', x, y)} />
-            <Anchor x={x2} y={y2} onMouseDown={() => setSelectedId(s.id)} onDragMove={({ x, y }) => setEnd('end', x, y)} />
+            <Anchor
+              x={x1} y={y1}
+              onMouseDown={() => { setSelectedId(s.id); setPropsOpen(true); }}
+              onDragMove={({ x, y }) => setEnd('start', x, y)}
+            />
+            <Anchor
+              x={x2} y={y2}
+              onMouseDown={() => { setSelectedId(s.id); setPropsOpen(true); }}
+              onDragMove={({ x, y }) => setEnd('end', x, y)}
+            />
           </>
         )}
       </>
     );
   };
 
-  const save = async () => {
+  // Export snapshot for parent
+  const exportSnapshot = async () => {
     const stage = stageRef.current;
-    if (!stage) return;
-    const stageJSON = stage.toJSON();
+    if (!stage) return null;
+    const stageJSON = JSON.parse(stage.toJSON());
     const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
-    onSave?.({ stageJSON: JSON.parse(stageJSON), annotatedBlob: blob });
+    return { stageJSON, annotatedBlob: blob };
+  };
+
+  // expose to parent
+  useImperativeHandle(ref, () => ({ exportSnapshot }));
+
+  // manual save button still available (calls onSave)
+  const save = async () => {
+    const snap = await exportSnapshot();
+    if (!snap) return;
+    onSave?.(snap);
     alert('Annotation saved for this sign.');
   };
 
   const selectedShape = shapes.find((s) => s.id === selectedId);
 
   return (
-    <Box ref={containerRef} sx={{ position: 'relative', border: '1px solid rgba(0,0,0,0.12)', borderRadius: 4, p: 0.5, display: 'grid', gap: 6, backgroundColor: 'rgba(245, 245, 245, 0.95)', color: '#111' }}>
-      {/* Toolbar */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', p: 0.5, border: '1px solid rgba(0,0,0,0.12)', borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.9)', color: '#111' }}>
+    <Box ref={containerRef} sx={{ position: 'relative', border: '1px solid rgba(0,0,0,0.12)', borderRadius: 4, p: 0.5 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', p: 0.5 }}>
         <ToggleButtonGroup size="small" exclusive value={tool} onChange={(_, v) => v && setTool(v)} color="primary">
           {tools.includes('text') && <ToggleButton value="text">TEXT</ToggleButton>}
           {tools.includes('rect') && <ToggleButton value="rect">RECT</ToggleButton>}
@@ -334,10 +365,24 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
           <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }} />
         </label>
 
-        <TextField label="New stroke" type="number" size="small" value={strokeWidth} onChange={(e) => setStrokeWidth(Math.max(1, Number(e.target.value) || 1))} inputProps={{ min: 1, style: { width: 56, color: '#111' } }} InputLabelProps={{ style: { color: '#111' } }} />
+        <TextField
+          label="New stroke"
+          type="number"
+          size="small"
+          value={strokeWidth}
+          onChange={(e) => setStrokeWidth(Math.max(1, Number(e.target.value) || 1))}
+          inputProps={{ min: 1, style: { width: 56 } }}
+        />
 
         {tool === 'text' && (
-          <TextField label="New font" type="number" size="small" value={fontSize} onChange={(e) => setFontSize(Math.max(8, Number(e.target.value) || 12))} inputProps={{ min: 8, style: { width: 64, color: '#111' } }} InputLabelProps={{ style: { color: '#111' } }} />
+          <TextField
+            label="New font"
+            type="number"
+            size="small"
+            value={fontSize}
+            onChange={(e) => setFontSize(Math.max(8, Number(e.target.value) || 12))}
+            inputProps={{ min: 8, style: { width: 64 } }}
+          />
         )}
 
         <Button size="small" variant="outlined" onClick={save} sx={{ ml: 'auto' }}>
@@ -345,7 +390,6 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         </Button>
       </Box>
 
-      {/* Canvas */}
       {!imgLoaded && (
         <Box sx={{ width: '100%', minHeight: 180, display: 'grid', placeItems: 'center', border: '1px dashed rgba(0,0,0,0.2)', borderRadius: 4, color: 'rgba(0,0,0,0.6)', fontSize: 14, p: 1.5 }}>
           {file ? 'Loading image…' : 'Upload an image to start annotating'}
@@ -383,8 +427,8 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                       strokeWidth={s.strokeWidth}
                       fill={s.color}
                       opacity={s.fillOpacity ?? 0.15}
-                      onClick={() => setSelectedId(s.id)}
-                      onTap={() => setSelectedId(s.id)}
+                      onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
+                      onTap={() => { setSelectedId(s.id); setPropsOpen(true); }}
                       onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                       onTransformEnd={(e) => onTransformEnd(e, s)}
                     />
@@ -398,7 +442,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                         align="center"
                         wrap="word"
                         listening
-                        onClick={() => setSelectedId(s.id)}
+                        onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
                       />
                     )}
                   </React.Fragment>
@@ -411,8 +455,8 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                     id={s.id} key={s.id}
                     x={s.x} y={s.y} text={s.text}
                     fontSize={s.fontSize} fill={s.color} draggable
-                    onClick={() => setSelectedId(s.id)}
-                    onTap={() => setSelectedId(s.id)}
+                    onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
+                    onTap={() => { setSelectedId(s.id); setPropsOpen(true); }}
                     onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                     onTransformEnd={(e) => onTransformEnd(e, s)}
                   />
@@ -428,9 +472,24 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
         </Stage>
       )}
 
-      {/* Floating properties */}
       {selectedShape && propsOpen && (
-        <Paper elevation={6} sx={{ position: 'fixed', right: 16, bottom: 16, maxWidth: 380, p: 1.25, borderRadius: 2, background: 'rgba(245, 245, 245, 0.92)', color: '#111', border: '1px solid rgba(0,0,0,0.1)', boxShadow: '0 6px 24px rgba(0,0,0,0.25)', zIndex: 1400, backdropFilter: 'blur(6px)' }}>
+        <Paper
+          elevation={6}
+          sx={{
+            position: 'fixed',
+            right: 16,
+            bottom: 16,
+            maxWidth: 380,
+            p: 1.25,
+            borderRadius: 2,
+            background: 'rgba(245, 245, 245, 0.92)',
+            color: '#111',
+            border: '1px solid rgba(0,0,0,0.1)',
+            boxShadow: '0 6px 24px rgba(0,0,0,0.25)',
+            zIndex: 1400,
+            backdropFilter: 'blur(6px)',
+          }}
+        >
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <Box sx={{ fontWeight: 600 }}>Selected:</Box>
             <Box sx={{ mr: 1 }}>{selectedShape.type}</Box>
@@ -440,7 +499,10 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
               <input
                 type="color"
                 value={selectedShape.color || '#ff4d4d'}
-                onChange={(e) => updateSelected({ color: e.target.value })}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  updateSelected({ color: v });
+                }}
                 style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }}
               />
             </label>
@@ -452,7 +514,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                 size="small"
                 value={selectedShape.strokeWidth ?? 2}
                 onChange={(e) => updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })}
-                inputProps={{ min: 1, style: { width: 56, color: '#111' } }}
+                inputProps={{ min: 1, style: { width: 56 } }}
               />
             )}
 
@@ -463,7 +525,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
                   size="small"
                   value={selectedShape.text || ''}
                   onChange={(e) => updateSelected({ text: e.target.value })}
-                  inputProps={{ style: { width: 180, color: '#111' } }}
+                  inputProps={{ style: { width: 180 } }}
                 />
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   Text color:
@@ -497,6 +559,7 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
               onClick={() => {
                 setShapes((s) => s.filter((x) => x.id !== selectedId));
                 setSelectedId(null);
+                setPropsOpen(false);
               }}
             >
               Delete
@@ -510,4 +573,6 @@ export default function SurveyAnnotator({ file, tools = [], onSave }) {
       )}
     </Box>
   );
-}
+});
+
+export default SurveyAnnotator;
