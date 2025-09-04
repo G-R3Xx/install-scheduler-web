@@ -29,6 +29,10 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   // Configure SendGrid
   sgMail.setApiKey(keyVal);
 
+const PDFDocument = require('pdfkit');
+const fetch = require('node-fetch'); // v2
+const cors = require('cors')({ origin: true });
+
   // Addresses from env (set via --set-env-vars) with fallbacks
   const toAddress = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
   const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au'; // must be verified in SendGrid
@@ -265,57 +269,203 @@ exports.testSendgridMail = onRequest(
 );
 
 // ---------- Email a Survey PDF (client-generated) ----------
-exports.sendSurveyPdf = onRequest(
-  { secrets: [SENDGRID_API_KEY] },
-  async (req, res) => {
-    // Basic CORS (adjust origin as needed)
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    if (req.method === 'OPTIONS') return res.status(204).send('');
-
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Use POST' });
-    }
-
+exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY] }, async (req, res) => {
+  return cors(req, res, async () => {
     try {
-      const { toEmail, subject, text, pdfBase64, fileName } = req.body || {};
-      if (!toEmail || !pdfBase64) {
-        return res.status(400).json({ error: 'toEmail and pdfBase64 are required' });
+      if (req.method === 'OPTIONS') return res.status(204).send('');
+      if (req.method !== 'POST') return res.status(405).send('Use POST');
+
+      const { surveyId, to: toOverride } = req.body || {};
+      if (!surveyId) return res.status(400).send('Missing surveyId');
+
+      // Load survey (stored in jobs collection with jobType === 'survey')
+      const snap = await db.collection('jobs').doc(String(surveyId)).get();
+      if (!snap.exists) return res.status(404).send('Survey not found');
+
+      const survey = snap.data() || {};
+      if ((survey.jobType || 'survey') !== 'survey') {
+        return res.status(400).send('Document is not a survey');
       }
 
-      // Configure SendGrid with your secret
-      sgMail.setApiKey(SENDGRID_API_KEY.value());
+      // Configure SendGrid
+      const key = SENDGRID_API_KEY.value();
+      sgMail.setApiKey(key);
+      const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
+      const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // From + optional default To via env (like your other endpoints)
-      const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
+      // Build PDF
+      const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
+      const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
+        .toString()
+        .replace(/\s+/g, '_')}.pdf`;
 
+      const buffers = [];
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 32,
+        info: { Title: title }
+      });
+      doc.on('data', (b) => buffers.push(b));
+      doc.on('error', (e) => console.error('PDF error', e));
+
+      // Header band
+      doc.rect(doc.page.margins.left - 10, 22, doc.page.width - 2 * doc.page.margins.left + 20, 40).fill('#0e2a47');
+      doc.fill('#ffffff').fontSize(18).text('SITE SURVEY', { align: 'left' }).moveDown(0.2);
+      doc.fontSize(10).text(new Date().toLocaleString(), { align: 'left' });
+      doc.moveDown(1.1);
+      doc.fill('#000000');
+
+      // Client block
+      const p = (label, value) => {
+        doc.font('Helvetica-Bold').fontSize(11).text(`${label}:`, { continued: true });
+        doc.font('Helvetica').text(` ${value || '—'}`);
+      };
+      p('Client', survey.clientName || survey.client || '—');
+      p('Company', survey.company || '—');
+      p('Contact', survey.contact || '—');
+      p('Phone', survey.phone || '—');
+      p('Email', survey.email || '—');
+      p('Address', survey.address || '—');
+      if (survey.description) {
+        doc.moveDown(0.4);
+        doc.font('Helvetica-Bold').text('Notes:');
+        doc.font('Helvetica').text(String(survey.description || ''), { width: 520 });
+      }
+
+      // Helper: fetch image -> Buffer
+      async function fetchImageBuf(url) {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) return null;
+          return Buffer.from(await r.arrayBuffer());
+        } catch {
+          return null;
+        }
+      }
+
+      // Signs
+      const signs = Array.isArray(survey.signs) ? survey.signs : [];
+      if (signs.length) {
+        doc.addPage();
+        doc.font('Helvetica-Bold').fontSize(14).text('Survey Signs', { underline: true });
+        doc.moveDown(0.6);
+
+        for (let i = 0; i < signs.length; i++) {
+          const s = signs[i] || {};
+          const caption = s.name || `Sign ${i + 1}`;
+          const desc = s.description || '';
+          const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
+
+          // Keep each sign (image + caption) on the same page
+          doc.moveDown(0.2);
+          const startY = doc.y;
+          const blockHeight = 320; // approx space for image + text
+          if (startY + blockHeight > doc.page.height - doc.page.margins.bottom) {
+            doc.addPage();
+          }
+
+          doc.font('Helvetica-Bold').fontSize(12).text(caption);
+          if (desc) {
+            doc.font('Helvetica').fontSize(10).text(desc, { width: 520 });
+            doc.moveDown(0.3);
+          }
+
+          if (imgUrl) {
+            const buf = await fetchImageBuf(imgUrl);
+            if (buf) {
+              // Place image max width ~520, keep aspect
+              try {
+                const x = doc.x;
+                const y = doc.y;
+                doc.image(buf, x, y, { fit: [520, 260], align: 'left' });
+                doc.moveDown( (260 / 14) ); // move roughly image height (line-height fudge)
+              } catch (e) {
+                console.warn('Image failed for sign', i, e?.message);
+                doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000').text('Image could not be embedded.');
+                doc.fillColor('#000000');
+              }
+            } else {
+              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000').text('Image unavailable.');
+              doc.fillColor('#000000');
+            }
+          } else {
+            doc.font('Helvetica-Oblique').fontSize(10).text('No image provided.');
+          }
+
+          doc.moveDown(0.6);
+        }
+      }
+
+      // Reference photos (thumbnails grid)
+      const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+      if (refs.length) {
+        doc.addPage();
+        doc.font('Helvetica-Bold').fontSize(14).text('Reference Photos', { underline: true });
+        doc.moveDown(0.6);
+
+        const cellW = 170, cellH = 120, gap = 10;
+        let x = doc.x, y = doc.y, col = 0;
+
+        for (let i = 0; i < refs.length; i++) {
+          const buf = await fetchImageBuf(refs[i]);
+          if (buf) {
+            if (y + cellH > doc.page.height - doc.page.margins.bottom) {
+              doc.addPage();
+              x = doc.page.margins.left; y = doc.y; col = 0;
+            }
+            try {
+              doc.image(buf, x, y, { fit: [cellW, cellH], align: 'left', valign: 'top' });
+            } catch (e) {
+              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
+                .text('Photo error', x, y);
+              doc.fillColor('#000000');
+            }
+            col++;
+            if (col === 3) { col = 0; x = doc.page.margins.left; y += cellH + gap; }
+            else { x += cellW + gap; }
+          }
+        }
+      }
+
+      doc.end();
+      const pdfBuf = Buffer.concat(buffers);
+
+      // Send email
       await sgMail.send({
-        to: toEmail,
-        from: fromAddress,
-        subject: subject || 'Site Survey PDF',
-        text: text || 'Attached is the generated Site Survey PDF.',
+        to,
+        from,
+        subject: `Site Survey — ${survey.clientName || survey.company || surveyId}`,
+        html: `
+          <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;">
+            <h2 style="margin:0 0 8px;">Site Survey</h2>
+            <div><strong>Client:</strong> ${survey.clientName || survey.client || ''}</div>
+            <div><strong>Company:</strong> ${survey.company || ''}</div>
+            <div><strong>Address:</strong> ${survey.address || ''}</div>
+            <p style="color:#666">Survey ID: ${surveyId}</p>
+          </div>
+        `,
         attachments: [
           {
-            content: pdfBase64,            // base64 (no data: prefix)
-            filename: fileName || 'survey.pdf',
+            content: pdfBuf.toString('base64'),
+            filename: fileName,
             type: 'application/pdf',
-            disposition: 'attachment',
-          },
+            disposition: 'attachment'
+          }
         ],
       });
 
-      return res.json({ ok: true });
+      console.log('✅ Survey PDF sent', { surveyId, to });
+      res.status(200).send('OK');
     } catch (err) {
       console.error('❌ sendSurveyPdf failed', {
         message: err?.message, code: err?.code, body: err?.response?.body
       });
       const details = err?.response?.body?.errors?.map(e => e.message).join('; ')
         || err?.message || 'Unknown error';
-      return res.status(500).json({ error: details });
+      res.status(500).send(`Failed: ${details}`);
     }
-  }
-);
+  });
+});
 
 
 // ---------- Manual resend endpoint ----------
