@@ -34,15 +34,22 @@ const fmtDate = (date) => {
   });
 };
 
+const toJSDate = (tsOrDate) =>
+  tsOrDate?.toDate?.() instanceof Date
+    ? tsOrDate.toDate()
+    : tsOrDate instanceof Date
+    ? tsOrDate
+    : null;
+
 const dayKey = (tsOrDate) => {
-  const d =
-    tsOrDate?.toDate?.() instanceof Date
-      ? tsOrDate.toDate()
-      : tsOrDate instanceof Date
-      ? tsOrDate
-      : null;
+  const d = toJSDate(tsOrDate);
   if (!d) return 'no-date';
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).toISOString();
+};
+
+const isCompleted = (job) => {
+  const s = String(job?.status || '').toLowerCase();
+  return s === 'complete' || s === 'completed';
 };
 
 function IconWithBadge({ icon, count, badgeColor }) {
@@ -125,16 +132,8 @@ export default function JobListPage() {
       setPhotoCountMap(photos);
       setHoursMap(hours);
 
-      // hide jobs with no install date, sort oldest → newest
-      const withInstall = onlyJobs
-        .filter((j) => j.installDate)
-        .sort((a, b) => {
-          const ad = a.installDate?.toDate?.() || 0;
-          const bd = b.installDate?.toDate?.() || 0;
-          return ad - bd;
-        });
-
-      setJobs(withInstall);
+      // Do not pre-filter/sort here; we'll derive in memos below
+      setJobs(onlyJobs);
     } finally {
       setLoading(false);
     }
@@ -146,8 +145,8 @@ export default function JobListPage() {
     const snap = await getDocs(query(col, where('jobType', '==', 'survey')));
     const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
     list.sort((a, b) => {
-      const ad = a.createdAt?.toDate?.() || 0;
-      const bd = b.createdAt?.toDate?.() || 0;
+      const ad = toJSDate(a.createdAt) || 0;
+      const bd = toJSDate(b.createdAt) || 0;
       return bd - ad;
     });
     setSurveys(list);
@@ -159,22 +158,47 @@ export default function JobListPage() {
   }, [loadJobs, loadSurveys]);
 
   /* ---------- derived ---------- */
-  const filteredJobs = useMemo(
-    () => jobs.filter((j) => (showCompleted ? true : (j.status || 'in progress') !== 'complete')),
-    [jobs, showCompleted]
+  const activeJobs = useMemo(
+    () =>
+      jobs
+        .filter((j) => !isCompleted(j) && j.installDate) // keep existing behavior: active need an installDate to show
+        .sort((a, b) => {
+          const ad = toJSDate(a.installDate) || 0;
+          const bd = toJSDate(b.installDate) || 0;
+          return ad - bd; // oldest → newest
+        }),
+    [jobs]
   );
 
-  const groups = useMemo(() => {
+  const completedJobsSorted = useMemo(() => {
+    const list = jobs.filter(isCompleted);
+    list.sort((a, b) => {
+      const aKey =
+        toJSDate(a.completedAt) ||
+        toJSDate(a.installDate) ||
+        toJSDate(a.createdAt) ||
+        new Date(0);
+      const bKey =
+        toJSDate(b.completedAt) ||
+        toJSDate(b.installDate) ||
+        toJSDate(b.createdAt) ||
+        new Date(0);
+      return bKey - aKey; // NEWEST first
+    });
+    return list;
+  }, [jobs]);
+
+  // Group only ACTIVE jobs by install date
+  const activeGroups = useMemo(() => {
     const map = new Map();
-    filteredJobs.forEach((j) => {
+    activeJobs.forEach((j) => {
       const k = dayKey(j.installDate);
-      const d =
-        j.installDate?.toDate?.() instanceof Date ? j.installDate.toDate() : null;
+      const d = toJSDate(j.installDate);
       if (!map.has(k)) map.set(k, { key: k, date: d, items: [] });
       map.get(k).items.push(j);
     });
     return Array.from(map.values()).sort((a, b) => (a.date || 0) - (b.date || 0));
-  }, [filteredJobs]);
+  }, [activeJobs]);
 
   const assignedNames = (j) => {
     const ids = Array.isArray(j.assignedTo) ? j.assignedTo : j.assignedTo ? [j.assignedTo] : [];
@@ -227,9 +251,12 @@ export default function JobListPage() {
       {tab === 'jobs' && (
         <>
           {loading && <Typography>Loading…</Typography>}
-          {!loading && groups.length === 0 && <Typography>No jobs to show.</Typography>}
+          {!loading && activeGroups.length === 0 && !showCompleted && (
+            <Typography>No jobs to show.</Typography>
+          )}
 
-          {groups.map((g) => (
+          {/* Active (scheduled) groups */}
+          {activeGroups.map((g) => (
             <Box key={g.key} sx={{ mt: 2 }}>
               <Typography variant="h6" sx={{ mb: 1 }}>
                 {fmtDate(g.date)}
@@ -296,12 +323,12 @@ export default function JobListPage() {
                       <IconWithBadge
                         icon={<PhotoCameraRoundedIcon fontSize="small" />}
                         count={photos}
-                        badgeColor="#2196f3" // light blue
+                        badgeColor="#2196f3"
                       />
                       <IconWithBadge
                         icon={<AccessTimeRoundedIcon fontSize="small" />}
                         count={hours}
-                        badgeColor="#7e57c2" // purple
+                        badgeColor="#7e57c2"
                       />
                     </Box>
                   </Paper>
@@ -309,6 +336,97 @@ export default function JobListPage() {
               })}
             </Box>
           ))}
+
+          {/* Completed section (only when toggled on) */}
+          {showCompleted && (
+            <Box sx={{ mt: 3 }}>
+              <Typography variant="h6" sx={{ mb: 1 }}>
+                Completed
+              </Typography>
+
+              {completedJobsSorted.length === 0 && (
+                <Typography color="text.secondary">No completed jobs.</Typography>
+              )}
+
+              {completedJobsSorted.map((j) => {
+                const client = j.clientName || j.client || 'Untitled';
+                const logo = j.companyLogoUrl || '';
+                const photos = photoCountMap[j.id] || 0;
+                const hours = hoursMap[j.id] || 0;
+
+                const completedOn =
+                  toJSDate(j.completedAt) ||
+                  toJSDate(j.installDate) ||
+                  toJSDate(j.createdAt);
+
+                return (
+                  <Paper
+                    key={j.id}
+                    onClick={() => openJob(j.id)}
+                    sx={{
+                      p: 1.5,
+                      mb: 1,
+                      borderRadius: 2,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 1.5,
+                      cursor: 'pointer',
+                      bgcolor: 'rgba(255,255,255,0.04)',
+                      ':hover': { bgcolor: 'rgba(255,255,255,0.06)' },
+                    }}
+                  >
+                    {/* Logo */}
+                    <Box
+                      sx={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 1.2,
+                        bgcolor: '#fff',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {logo ? (
+                        <img
+                          src={logo}
+                          alt="logo"
+                          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        />
+                      ) : (
+                        <Typography sx={{ fontWeight: 800, color: '#111' }}>
+                          {client.slice(0, 2).toUpperCase()}
+                        </Typography>
+                      )}
+                    </Box>
+
+                    {/* Content */}
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 700 }}>{client}</Typography>
+                      <Typography variant="body2" sx={{ opacity: 0.8 }}>
+                        Completed on: {completedOn ? fmtDate(completedOn) : '—'}
+                      </Typography>
+                    </Box>
+
+                    {/* Icons */}
+                    <Box sx={{ display: 'flex', gap: 1 }}>
+                      <IconWithBadge
+                        icon={<PhotoCameraRoundedIcon fontSize="small" />}
+                        count={photos}
+                        badgeColor="#2196f3"
+                      />
+                      <IconWithBadge
+                        icon={<AccessTimeRoundedIcon fontSize="small" />}
+                        count={hours}
+                        badgeColor="#7e57c2"
+                      />
+                    </Box>
+                  </Paper>
+                );
+              })}
+            </Box>
+          )}
         </>
       )}
 
