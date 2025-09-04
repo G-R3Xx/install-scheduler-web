@@ -108,7 +108,13 @@ export default function JobDetailPage() {
   const [allUsers, setAllUsers] = useState([]);
   const [assignSel, setAssignSel] = useState([]); // [{id,label}]
 
+  // Installer notes (INSIDE the component)
+  const [installerNotes, setInstallerNotes] = useState('');
+  const [savingNotes, setSavingNotes] = useState(false);
+
   const isSurvey = job?.jobType === 'survey';
+  const statusLc = String(job?.status || '').toLowerCase();
+  const isComplete = ['complete', 'completed', 'done'].includes(statusLc);
 
   // ---------- data fetch ----------
   const fetchJob = useCallback(async () => {
@@ -156,6 +162,7 @@ export default function JobDetailPage() {
 
     setJob(normalized);
     setSignatureURL(normalized.signatureURL || null);
+    setInstallerNotes(normalized.installerNotes || '');
   }, [jobId]);
 
   const fetchHours = useCallback(async () => {
@@ -309,6 +316,19 @@ export default function JobDetailPage() {
     } catch (err) {
       console.error('Failed to delete job', err);
       alert('Failed to delete job.');
+    }
+  };
+
+  const handleSaveInstallerNotes = async () => {
+    try {
+      setSavingNotes(true);
+      await updateDoc(doc(db, 'jobs', jobId), { installerNotes });
+      setSnack({ open: true, severity: 'success', msg: 'Notes saved.' });
+    } catch (e) {
+      console.error(e);
+      setSnack({ open: true, severity: 'error', msg: 'Failed to save notes.' });
+    } finally {
+      setSavingNotes(false);
     }
   };
 
@@ -858,6 +878,32 @@ export default function JobDetailPage() {
             </>
           )}
 
+          {/* Installer Notes */}
+          {!isSurvey && (
+            <Box mt={3}>
+              <Typography variant="h6">Installer Notes</Typography>
+              <Divider sx={{ mb: 1 }} />
+              <TextField
+                label='Notes: Any issues? What fixings and/or extra media/substrates were used?'
+                placeholder='E.g., Needed extra tek screws for panel 3; used ACM backing; minor wall bowing on north face...'
+                value={installerNotes}
+                onChange={(e) => setInstallerNotes(e.target.value)}
+                multiline
+                minRows={3}
+                fullWidth
+              />
+              <Box sx={{ mt: 1.5 }}>
+                <Button
+                  variant="outlined"
+                  onClick={handleSaveInstallerNotes}
+                  disabled={savingNotes}
+                >
+                  {savingNotes ? 'Saving…' : 'Save Notes'}
+                </Button>
+              </Box>
+            </Box>
+          )}
+
           {/* SIGNATURE (jobs only) */}
           {!isSurvey && (
             <Box mt={3}>
@@ -949,8 +995,8 @@ export default function JobDetailPage() {
               Back to List
             </Button>
 
-            {!isSurvey &&
-              (job.status === 'complete' ? (
+            {!isSurvey && (
+              isComplete ? (
                 <Button variant="outlined" color="warning" onClick={handleReopenJob}>
                   Reopen Job
                 </Button>
@@ -958,7 +1004,8 @@ export default function JobDetailPage() {
                 <Button variant="outlined" color="success" onClick={handleCompleteJob}>
                   Complete Job
                 </Button>
-              ))}
+              )
+            )}
           </Box>
         </CardContent>
       </Card>
