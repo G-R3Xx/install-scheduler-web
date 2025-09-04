@@ -4,12 +4,12 @@
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
-const PDFDocument = require('pdfkit');
-const fetch = require('node-fetch'); // v2
 
-// ---- Admin / SendGrid ----
+// ---- Admin / SendGrid / PDF / Fetch ----
 const admin = require('firebase-admin');
 const sgMail = require('@sendgrid/mail');
+const PDFDocument = require('pdfkit');
+const fetch = require('node-fetch'); // v2
 
 // Initialize Admin with your storage bucket so we can sign URLs
 admin.initializeApp({ storageBucket: 'install-scheduler.appspot.com' });
@@ -18,7 +18,7 @@ const db = admin.firestore();
 // Secret set with: firebase functions:secrets:set SENDGRID_API_KEY
 const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY');
 
-// Helpers
+// ---- Helpers ----
 const lower = (s) => (s || '').toString().toLowerCase().trim();
 const esc = (s) =>
   String(s || '')
@@ -26,12 +26,9 @@ const esc = (s) =>
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
-// ---------- Shared email sender ----------
+// ---------- Shared email sender (Job Completed HTML email) ----------
 async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
-  // Configure SendGrid
   sgMail.setApiKey(keyVal);
-
-const cors = require('cors')({ origin: true });
 
   // Addresses from env (set via --set-env-vars) with fallbacks
   const toAddress = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
@@ -269,29 +266,32 @@ exports.testSendgridMail = onRequest(
 );
 
 // ---------- Email a Survey PDF (client-generated) ----------
-exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-central1' }, async (req, res) => {
-  // --- CORS ---
-  const origin = req.get('origin') || '';
-  const ALLOWED_ORIGINS = [
-    'https://install-scheduler.web.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:3000'
-  ];
-  if (ALLOWED_ORIGINS.includes(origin)) {
-    res.set('Access-Control-Allow-Origin', origin);
-  }
-  res.set('Vary', 'Origin');
+exports.sendSurveyPdf = onRequest(
+  { secrets: [SENDGRID_API_KEY], region: 'us-central1' },
+  async (req, res) => {
+    // --- CORS ---
+    const origin = req.get('origin') || '';
+    const ALLOWED_ORIGINS = [
+      'https://install-scheduler.web.app',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+    ];
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      res.set('Access-Control-Allow-Origin', origin);
+    }
+    res.set('Vary', 'Origin');
 
-  if (req.method === 'OPTIONS') {
-    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.set('Access-Control-Max-Age', '3600');
-    return res.status(204).send('');
-  }
-  if (req.method !== 'POST') {
-    return res.status(405).send('Use POST');
-  }
+    if (req.method === 'OPTIONS') {
+      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.set('Access-Control-Max-Age', '3600');
+      return res.status(204).send('');
+    }
+    if (req.method !== 'POST') {
+      return res.status(405).send('Use POST');
+    }
 
+    try {
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
 
@@ -305,8 +305,7 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
       }
 
       // Configure SendGrid
-      const key = SENDGRID_API_KEY.value();
-      sgMail.setApiKey(key);
+      sgMail.setApiKey(SENDGRID_API_KEY.value());
       const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
@@ -317,32 +316,32 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
         .replace(/\s+/g, '_')}.pdf`;
 
       const buffers = [];
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 32,
-        info: { Title: title }
-      });
+      const doc = new PDFDocument({ size: 'A4', margin: 32, info: { Title: title } });
       doc.on('data', (b) => buffers.push(b));
       doc.on('error', (e) => console.error('PDF error', e));
 
       // Header band
-      doc.rect(doc.page.margins.left - 10, 22, doc.page.width - 2 * doc.page.margins.left + 20, 40).fill('#0e2a47');
-      doc.fill('#ffffff').fontSize(18).text('SITE SURVEY', { align: 'left' }).moveDown(0.2);
-      doc.fontSize(10).text(new Date().toLocaleString(), { align: 'left' });
-      doc.moveDown(1.1);
-      doc.fill('#000000');
+      doc.rect(
+        doc.page.margins.left - 10,
+        22,
+        doc.page.width - 2 * doc.page.margins.left + 20,
+        40
+      ).fill('#0e2a47');
+      doc.fill('#ffffff').fontSize(18).text('SITE SURVEY').moveDown(0.2);
+      doc.fontSize(10).text(new Date().toLocaleString());
+      doc.moveDown(1.1).fill('#000000');
 
       // Client block
       const p = (label, value) => {
         doc.font('Helvetica-Bold').fontSize(11).text(`${label}:`, { continued: true });
         doc.font('Helvetica').text(` ${value || '—'}`);
       };
-      p('Client', survey.clientName || survey.client || '—');
-      p('Company', survey.company || '—');
-      p('Contact', survey.contact || '—');
-      p('Phone', survey.phone || '—');
-      p('Email', survey.email || '—');
-      p('Address', survey.address || '—');
+      p('Client',  survey.clientName || survey.client);
+      p('Company', survey.company);
+      p('Contact', survey.contact);
+      p('Phone',   survey.phone);
+      p('Email',   survey.email);
+      p('Address', survey.address);
       if (survey.description) {
         doc.moveDown(0.4);
         doc.font('Helvetica-Bold').text('Notes:');
@@ -374,7 +373,6 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
           const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
 
           // Keep each sign (image + caption) on the same page
-          doc.moveDown(0.2);
           const startY = doc.y;
           const blockHeight = 320; // approx space for image + text
           if (startY + blockHeight > doc.page.height - doc.page.margins.bottom) {
@@ -390,19 +388,19 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
           if (imgUrl) {
             const buf = await fetchImageBuf(imgUrl);
             if (buf) {
-              // Place image max width ~520, keep aspect
               try {
                 const x = doc.x;
                 const y = doc.y;
                 doc.image(buf, x, y, { fit: [520, 260], align: 'left' });
-                doc.moveDown( (260 / 14) ); // move roughly image height (line-height fudge)
+                doc.moveDown(260 / 14); // approximate line-height move
               } catch (e) {
-                console.warn('Image failed for sign', i, e?.message);
-                doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000').text('Image could not be embedded.');
+                doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
+                  .text('Image could not be embedded.');
                 doc.fillColor('#000000');
               }
             } else {
-              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000').text('Image unavailable.');
+              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
+                .text('Image unavailable.');
               doc.fillColor('#000000');
             }
           } else {
@@ -432,7 +430,7 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
             }
             try {
               doc.image(buf, x, y, { fit: [cellW, cellH], align: 'left', valign: 'top' });
-            } catch (e) {
+            } catch {
               doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
                 .text('Photo error', x, y);
               doc.fillColor('#000000');
@@ -461,29 +459,26 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-cen
             <p style="color:#666">Survey ID: ${surveyId}</p>
           </div>
         `,
-        attachments: [
-          {
-            content: pdfBuf.toString('base64'),
-            filename: fileName,
-            type: 'application/pdf',
-            disposition: 'attachment'
-          }
-        ],
+        attachments: [{
+          content: pdfBuf.toString('base64'),
+          filename: fileName,
+          type: 'application/pdf',
+          disposition: 'attachment',
+        }],
       });
 
-      console.log('✅ Survey PDF sent', { surveyId, to });
-      res.status(200).send('OK');
+      console.log('✅ Survey PDF sent', { surveyId });
+      return res.status(200).send('OK');
     } catch (err) {
       console.error('❌ sendSurveyPdf failed', {
         message: err?.message, code: err?.code, body: err?.response?.body
       });
       const details = err?.response?.body?.errors?.map(e => e.message).join('; ')
         || err?.message || 'Unknown error';
-      res.status(500).send(`Failed: ${details}`);
+      return res.status(500).send(`Failed: ${details}`);
     }
-  });
-
-
+  }
+);
 
 // ---------- Manual resend endpoint ----------
 // GET .../resendCompletionEmail?jobId=ABC&to=me@x.com&force=true
