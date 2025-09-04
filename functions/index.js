@@ -4,6 +4,8 @@
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
+const PDFDocument = require('pdfkit');
+const fetch = require('node-fetch'); // v2
 
 // ---- Admin / SendGrid ----
 const admin = require('firebase-admin');
@@ -29,8 +31,6 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   // Configure SendGrid
   sgMail.setApiKey(keyVal);
 
-const PDFDocument = require('pdfkit');
-const fetch = require('node-fetch'); // v2
 const cors = require('cors')({ origin: true });
 
   // Addresses from env (set via --set-env-vars) with fallbacks
@@ -269,11 +269,28 @@ exports.testSendgridMail = onRequest(
 );
 
 // ---------- Email a Survey PDF (client-generated) ----------
-exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY] }, async (req, res) => {
-  return cors(req, res, async () => {
-    try {
-      if (req.method === 'OPTIONS') return res.status(204).send('');
-      if (req.method !== 'POST') return res.status(405).send('Use POST');
+exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY], region: 'us-central1' }, async (req, res) => {
+  // --- CORS ---
+  const origin = req.get('origin') || '';
+  const ALLOWED_ORIGINS = [
+    'https://install-scheduler.web.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000'
+  ];
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin);
+  }
+  res.set('Vary', 'Origin');
+
+  if (req.method === 'OPTIONS') {
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Access-Control-Max-Age', '3600');
+    return res.status(204).send('');
+  }
+  if (req.method !== 'POST') {
+    return res.status(405).send('Use POST');
+  }
 
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
@@ -465,7 +482,7 @@ exports.sendSurveyPdf = onRequest({ secrets: [SENDGRID_API_KEY] }, async (req, r
       res.status(500).send(`Failed: ${details}`);
     }
   });
-});
+
 
 
 // ---------- Manual resend endpoint ----------
