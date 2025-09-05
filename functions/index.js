@@ -309,141 +309,281 @@ exports.sendSurveyPdf = onRequest(
       const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // Build PDF
-      const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
-      const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
-        .toString()
-        .replace(/\s+/g, '_')}.pdf`;
+     // ---------- Build a polished, branded PDF ----------
+const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
+const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
+  .toString()
+  .replace(/\s+/g, '_')}.pdf`;
 
-      const buffers = [];
-      const doc = new PDFDocument({ size: 'A4', margin: 32, info: { Title: title } });
-      doc.on('data', (b) => buffers.push(b));
-      doc.on('error', (e) => console.error('PDF error', e));
+const buffers = [];
+const doc = new PDFDocument({
+  size: 'A4',
+  margin: 36, // a bit tighter than default; we manage whitespace ourselves
+  info: { Title: title }
+});
+doc.on('data', (b) => buffers.push(b));
+doc.on('error', (e) => console.error('PDF error', e));
 
-      // Header band
-      doc.rect(
-        doc.page.margins.left - 10,
-        22,
-        doc.page.width - 2 * doc.page.margins.left + 20,
-        40
-      ).fill('#0e2a47');
-      doc.fill('#ffffff').fontSize(18).text('SITE SURVEY').moveDown(0.2);
-      doc.fontSize(10).text(new Date().toLocaleString());
-      doc.moveDown(1.1).fill('#000000');
+/* ---- quick style helpers ---- */
+const ACCENT = '#0E2A47';
+const MUTED = '#6b7280';
+const BORDER = '#e5e7eb';
+const TEXT = '#111827';
+const SUBTLE = '#f3f4f6';
+doc.fillColor(TEXT);
 
-      // Client block
-      const p = (label, value) => {
-        doc.font('Helvetica-Bold').fontSize(11).text(`${label}:`, { continued: true });
-        doc.font('Helvetica').text(` ${value || '—'}`);
-      };
-      p('Client',  survey.clientName || survey.client);
-      p('Company', survey.company);
-      p('Contact', survey.contact);
-      p('Phone',   survey.phone);
-      p('Email',   survey.email);
-      p('Address', survey.address);
-      if (survey.description) {
-        doc.moveDown(0.4);
-        doc.font('Helvetica-Bold').text('Notes:');
-        doc.font('Helvetica').text(String(survey.description || ''), { width: 520 });
-      }
+const pageWidth = doc.page.width;
+const L = doc.page.margins.left;
+const R = pageWidth - doc.page.margins.right;
+const usableWidth = R - L;
 
-      // Helper: fetch image -> Buffer
-      async function fetchImageBuf(url) {
+function hr(y = doc.y, color = BORDER) {
+  doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
+}
+
+function sectionTitle(text) {
+  doc.moveDown(0.7);
+  doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(text);
+  hr(doc.y + 4);
+  doc.moveDown(0.7);
+}
+
+function kvRow(label, value, colX, labelW = 80, valueW = 190) {
+  doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(`${label}`, colX, doc.y, {
+    width: labelW, continued: false
+  });
+  const yTop = doc.y - 12;
+  doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yTop, {
+    width: valueW
+  });
+}
+
+/* ---- footer page numbers ---- */
+function drawFooter() {
+  const str = `Page ${doc.page.number}`;
+  doc.font('Helvetica').fontSize(9).fillColor(MUTED);
+  doc.text(str, L, doc.page.height - doc.page.margins.bottom + 10, {
+    width: usableWidth,
+    align: 'right'
+  });
+}
+
+doc.on('pageAdded', drawFooter);
+
+/* ---- header band w/ logo ---- */
+(function drawHeader() {
+  // Accent bar
+  doc.save();
+  doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
+  doc.restore();
+
+  // Logo (optional — swap URL if you have a better asset)
+  const logoUrl = 'https://tenderedge.com.au/images/logo-2019.png';
+
+  // Fetch logo (silently ignore if fails)
+  // You already have node-fetch available at top-level
+  // we’ll inline a tiny helper here to keep this block self-contained:
+  async function fetchBuf(url) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      return Buffer.from(await r.arrayBuffer());
+    } catch {
+      return null;
+    }
+  }
+
+  // Render header text and logo synchronously: we’ll kick off the logo fetch now
+  const headerY = 20;
+  doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, headerY, {
+    width: usableWidth,
+    align: 'left'
+  });
+  doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, headerY + 22);
+
+  // Reserve space
+  doc.moveDown(2.2);
+
+  // Try drawing the logo on the right
+  // Note: PDFKit is sync; we await inside an IIFE and then draw synchronously
+  // by temporarily pausing layout (translate current y)
+  const yAfterHeader = doc.y;
+  (async () => {
+    const logo = await fetchBuf(logoUrl);
+    if (logo) {
+      // Save the current page context by capturing page number and coordinates
+      const currentPage = doc.page;
+      const x = R - 140; // right side
+      const y = 12; // inside the bar
+      try {
+        doc.switchToPage(currentPage.index);
+        doc.image(logo, x, y, { fit: [120, 40], align: 'right', valign: 'center' });
+      } catch {}
+    }
+  })().finally(() => {
+    doc.y = yAfterHeader;
+  });
+})();
+
+/* ---- Client Details card ---- */
+(function clientCard() {
+  sectionTitle('Client Details');
+
+  // subtle card background
+  const cardY = doc.y;
+  const cardH = 92;
+  doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
+  doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).lineWidth(1).strokeColor(BORDER).stroke().restore();
+
+  const col1X = L + 12;
+  const col2X = L + Math.floor(usableWidth / 2) + 12;
+
+  doc.y = cardY + 6;
+  kvRow('Client',  survey.clientName || survey.client, col1X);
+  kvRow('Company', survey.company, col1X);
+  kvRow('Contact', survey.contact, col1X);
+
+  doc.y = cardY + 6;
+  kvRow('Phone',   survey.phone, col2X);
+  kvRow('Email',   survey.email, col2X);
+  kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
+
+  doc.moveDown(1.4);
+})();
+
+/* ---- Survey Notes ---- */
+if (survey.description) {
+  sectionTitle('Survey Notes');
+  doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(String(survey.description || ''), {
+    width: usableWidth
+  });
+}
+
+/* ---- small helper to ensure a block fits current page ---- */
+function ensureSpace(needed) {
+  const bottom = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + needed > bottom) doc.addPage();
+}
+
+/* ---- fetch image helper (reuse) ---- */
+async function fetchImageBuf(url) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    return Buffer.from(await r.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/* ---- Survey Signs ---- */
+const signsArr = Array.isArray(survey.signs) ? survey.signs : [];
+if (signsArr.length) {
+  sectionTitle('Survey Signs');
+
+  for (let i = 0; i < signsArr.length; i++) {
+    const s = signsArr[i] || {};
+    const caption = s.name || `Sign ${i + 1}`;
+    const desc = s.description || '';
+    const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
+
+    // anticipated height for one block (title + desc + image)
+    const blockH = 20 /*title*/ + (desc ? 36 : 0) + 260 /*image*/ + 18 /*spacer*/;
+    ensureSpace(blockH);
+
+    // block title
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(TEXT).text(caption);
+    if (desc) {
+      doc.moveDown(0.15);
+      doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(desc, { width: usableWidth });
+    }
+
+    if (imgUrl) {
+      const buf = await fetchImageBuf(imgUrl);
+      if (buf) {
+        // soft image frame
+        const imgY = doc.y + 6;
+        const imgH = 260;
+        doc.save()
+          .rect(L, imgY - 4, usableWidth, imgH + 8)
+          .fill(SUBTLE)
+          .restore();
+        doc.save()
+          .rect(L, imgY - 4, usableWidth, imgH + 8)
+          .lineWidth(1).strokeColor(BORDER).stroke()
+          .restore();
+
         try {
-          const r = await fetch(url);
-          if (!r.ok) return null;
-          return Buffer.from(await r.arrayBuffer());
+          doc.image(buf, L + 6, imgY, { fit: [usableWidth - 12, imgH], align: 'left' });
         } catch {
-          return null;
+          doc.font('Helvetica-Oblique').fontSize(10).fillColor('#b91c1c').text('Image could not be embedded.', L + 12, imgY + 6);
         }
+        doc.moveDown(imgH / 14 + 0.5);
+      } else {
+        doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.');
       }
+    } else {
+      doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
+    }
 
-      // Signs
-      const signs = Array.isArray(survey.signs) ? survey.signs : [];
-      if (signs.length) {
-        doc.addPage();
-        doc.font('Helvetica-Bold').fontSize(14).text('Survey Signs', { underline: true });
-        doc.moveDown(0.6);
+    doc.moveDown(0.6);
+  }
+}
 
-        for (let i = 0; i < signs.length; i++) {
-          const s = signs[i] || {};
-          const caption = s.name || `Sign ${i + 1}`;
-          const desc = s.description || '';
-          const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
+/* ---- Reference Photos (grid) ---- */
+const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+if (refs.length) {
+  sectionTitle('Reference Photos');
 
-          // Keep each sign (image + caption) on the same page
-          const startY = doc.y;
-          const blockHeight = 320; // approx space for image + text
-          if (startY + blockHeight > doc.page.height - doc.page.margins.bottom) {
-            doc.addPage();
-          }
+  const cellW = Math.floor((usableWidth - 20) / 3); // 3 columns + 10px gaps
+  const cellH = 120;
+  const gap = 10;
 
-          doc.font('Helvetica-Bold').fontSize(12).text(caption);
-          if (desc) {
-            doc.font('Helvetica').fontSize(10).text(desc, { width: 520 });
-            doc.moveDown(0.3);
-          }
+  let col = 0;
+  let x = L;
+  let yTop = doc.y;
 
-          if (imgUrl) {
-            const buf = await fetchImageBuf(imgUrl);
-            if (buf) {
-              try {
-                const x = doc.x;
-                const y = doc.y;
-                doc.image(buf, x, y, { fit: [520, 260], align: 'left' });
-                doc.moveDown(260 / 14); // approximate line-height move
-              } catch (e) {
-                doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
-                  .text('Image could not be embedded.');
-                doc.fillColor('#000000');
-              }
-            } else {
-              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
-                .text('Image unavailable.');
-              doc.fillColor('#000000');
-            }
-          } else {
-            doc.font('Helvetica-Oblique').fontSize(10).text('No image provided.');
-          }
+  for (let i = 0; i < refs.length; i++) {
+    ensureSpace(cellH + 16);
+    const buf = await fetchImageBuf(refs[i]);
 
-          doc.moveDown(0.6);
-        }
+    // light card
+    doc.save()
+      .rect(x, doc.y, cellW, cellH)
+      .fill(SUBTLE)
+      .restore();
+    doc.save()
+      .rect(x, doc.y, cellW, cellH)
+      .lineWidth(1).strokeColor(BORDER).stroke()
+      .restore();
+
+    if (buf) {
+      try {
+        doc.image(buf, x + 4, doc.y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
+      } catch {
+        doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, doc.y + 6);
       }
+    } else {
+      doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, doc.y + 6);
+    }
 
-      // Reference photos (thumbnails grid)
-      const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
-      if (refs.length) {
-        doc.addPage();
-        doc.font('Helvetica-Bold').fontSize(14).text('Reference Photos', { underline: true });
-        doc.moveDown(0.6);
+    // advance grid
+    col++;
+    if (col === 3) {
+      col = 0;
+      doc.moveDown(cellH / 14 + 0.6);
+      x = L;
+    } else {
+      x += cellW + gap;
+    }
+  }
+}
 
-        const cellW = 170, cellH = 120, gap = 10;
-        let x = doc.x, y = doc.y, col = 0;
+// finalize
+drawFooter();
+doc.end();
+const pdfBuf = Buffer.concat(buffers);
 
-        for (let i = 0; i < refs.length; i++) {
-          const buf = await fetchImageBuf(refs[i]);
-          if (buf) {
-            if (y + cellH > doc.page.height - doc.page.margins.bottom) {
-              doc.addPage();
-              x = doc.page.margins.left; y = doc.y; col = 0;
-            }
-            try {
-              doc.image(buf, x, y, { fit: [cellW, cellH], align: 'left', valign: 'top' });
-            } catch {
-              doc.font('Helvetica-Oblique').fontSize(10).fillColor('#aa0000')
-                .text('Photo error', x, y);
-              doc.fillColor('#000000');
-            }
-            col++;
-            if (col === 3) { col = 0; x = doc.page.margins.left; y += cellH + gap; }
-            else { x += cellW + gap; }
-          }
-        }
-      }
-
-      doc.end();
-      const pdfBuf = Buffer.concat(buffers);
 
       // Send email
       await sgMail.send({
