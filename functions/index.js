@@ -30,9 +30,8 @@ const esc = (s) =>
 async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   sgMail.setApiKey(keyVal);
 
-  // Addresses from env (set via --set-env-vars) with fallbacks
   const toAddress = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
-  const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au'; // must be verified in SendGrid
+  const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
   // Build user map
   const usersSnap = await db.collection('users').get();
@@ -42,7 +41,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     userMap[d.id] = u.shortName || u.displayName || u.email || d.id;
   });
 
-  // ---- Helpers to normalize image URLs (http, gs://, or bare storage paths) ----
+  // Normalize storage URLs
   const bucket = admin.storage().bucket();
   const isHttp = (u) => /^https?:\/\//i.test(u || '');
   const isGs = (u) => /^gs:\/\//i.test(u || '');
@@ -50,24 +49,18 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   async function toHttpUrl(pathOrUrl) {
     if (!pathOrUrl) return null;
     if (isHttp(pathOrUrl)) return pathOrUrl;
-
-    // Extract object path from gs:// or accept a bare storage path
     let objectPath = pathOrUrl;
-    if (isGs(objectPath)) {
-      objectPath = objectPath.replace(/^gs:\/\/[^/]+\//i, '');
-    }
-
+    if (isGs(objectPath)) objectPath = objectPath.replace(/^gs:\/\/[^/]+\//i, '');
     try {
       const [signed] = await bucket
         .file(objectPath)
-        .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 }); // 24h
+        .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 });
       return signed;
     } catch (err) {
       console.warn('Could not sign URL', { objectPath, err: err?.message });
       return null;
     }
   }
-
   async function normalizeMany(list) {
     const arr = Array.isArray(list) ? list : [];
     const resolved = await Promise.all(arr.map(toHttpUrl));
@@ -78,7 +71,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     return url || null;
   }
 
-  // ---- Extract job fields ----
+  // Extract job fields
   const clientName  = job.clientName || job.company || 'Unknown Client';
   const address     = job.address || 'No address supplied';
   const description = job.description || '';
@@ -86,19 +79,13 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   const completedPhotos = await normalizeMany(job.completedPhotos);
   const signatureUrl    = await normalizeOne(job.signatureURL || job.signatureUrl);
 
-  console.log('Email image summary', {
-    jobId,
-    photos: completedPhotos.length,
-    hasSignature: !!signatureUrl,
-  });
-
   let installDateStr = 'N/A';
   try {
     const d = job.installDate?.toDate?.()
       ? job.installDate.toDate()
       : (job.installDate instanceof Date ? job.installDate : null);
     if (d) installDateStr = d.toLocaleString();
-  } catch (_) {}
+  } catch {}
 
   const assignedIds = Array.isArray(job.assignedTo)
     ? job.assignedTo
@@ -131,7 +118,6 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     breakdownRows = `<tr><td colspan="2" style="padding:6px 10px;border:1px solid #ddd;">No hours logged</td></tr>`;
   }
 
-  // Photos & signature sections
   let photosHtml = '';
   if (completedPhotos.length) {
     photosHtml += `<h3 style="margin-top:20px;">Completed Photos</h3><div>`;
@@ -190,14 +176,6 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     subject: `Job Completed — ${clientName}`,
     html,
   });
-
-  console.log('✅ Completion email sent', {
-    jobId,
-    toAddress,
-    fromAddress,
-    photos: completedPhotos.length,
-    hasSignature: !!signatureUrl,
-  });
 }
 
 // ---------- Trigger: send when job becomes completed ----------
@@ -212,22 +190,11 @@ exports.sendJobCompletedEmail = onDocumentWritten(
     const beforeStatus = before ? lower(before.status) : null;
     const afterStatus  = after  ? lower(after.status)  : null;
 
-    console.log('sendJobCompletedEmail fired', {
-      jobId, hasBefore: !!before, hasAfter: !!after, beforeStatus, afterStatus
-    });
-
-    // Require transition to completed
     const isNowCompleted = after && (afterStatus === 'complete' || afterStatus === 'completed');
-    if (!isNowCompleted) {
-      console.log('Skip: not completed now', { jobId, afterStatus });
-      return;
-    }
+    if (!isNowCompleted) return;
 
     const wasCompleted = before && (beforeStatus === 'complete' || beforeStatus === 'completed');
-    if (wasCompleted) {
-      console.log('Skip: already completed before', { jobId, beforeStatus, afterStatus });
-      return;
-    }
+    if (wasCompleted) return;
 
     try {
       await sendCompletionEmail({
@@ -236,9 +203,7 @@ exports.sendJobCompletedEmail = onDocumentWritten(
         keyVal: SENDGRID_API_KEY.value(),
       });
     } catch (err) {
-      console.error('❌ sendJobCompletedEmail failed', {
-        jobId, error: err?.message, code: err?.code, body: err?.response?.body
-      });
+      console.error('❌ sendJobCompletedEmail failed', err);
     }
   }
 );
@@ -259,7 +224,6 @@ exports.testSendgridMail = onRequest(
       });
       res.send(`✅ Test email sent to ${to}`);
     } catch (err) {
-      console.error('SendGrid test failed:', err);
       res.status(500).send(`❌ Failed: ${err.message}`);
     }
   }
@@ -309,24 +273,22 @@ exports.sendSurveyPdf = onRequest(
       const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // ---------- Build a polished, branded PDF ----------
+      // ---------- PDF ----------
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString()
         .replace(/\s+/g, '_')}.pdf`;
 
-      // helper to fetch image buffers
       async function fetchImageBuf(url) {
         try {
           const r = await fetch(url);
-          if (!r.ok) return null;
+        if (!r.ok) return null;
           return Buffer.from(await r.arrayBuffer());
         } catch {
           return null;
         }
       }
 
-      // pre-fetch logo so we can draw synchronously
       const logoBuf = await fetchImageBuf('https://tenderedge.com.au/images/logo-2019.png');
 
       const buffers = [];
@@ -338,7 +300,6 @@ exports.sendSurveyPdf = onRequest(
       doc.on('data', (b) => buffers.push(b));
       doc.on('error', (e) => console.error('PDF error', e));
 
-      // styles
       const ACCENT = '#0E2A47';
       const MUTED = '#6b7280';
       const BORDER = '#e5e7eb';
@@ -351,39 +312,52 @@ exports.sendSurveyPdf = onRequest(
       const R = pageWidth - doc.page.margins.right;
       const usableWidth = R - L;
 
-      function hr(y = doc.y, color = BORDER) {
+      const drawFooter = () => {
+        const y = doc.page.height - doc.page.margins.bottom - 10;
+        doc.save();
+        doc.font('Helvetica').fontSize(9).fillColor(MUTED);
+        // draw within margin; no line break to avoid page growth
+        doc.text(`Page ${doc.page.number}`, L, y, { width: usableWidth, align: 'right', lineBreak: false });
+        doc.restore();
+      };
+
+      const drawHeader = () => {
+        doc.save(); doc.rect(0, 0, pageWidth, 70).fill(ACCENT); doc.restore();
+        doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth, align: 'left' });
+        doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
+        if (logoBuf) { try { doc.image(logoBuf, R - 140, 12, { fit: [120, 40] }); } catch {} }
+        doc.moveDown(2.2);
+      };
+
+      const ensureSpace = (needed) => {
+        const bottom = doc.page.height - doc.page.margins.bottom;
+        if (doc.y + needed > bottom) {
+          // finalize current page
+          drawFooter();
+          doc.addPage();
+          // new page header
+          drawHeader();
+        }
+      };
+
+      // first-page header
+      drawHeader();
+
+      // Section helpers
+      const hr = (y = doc.y, color = BORDER) => {
         doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
-      }
-      function sectionTitle(text) {
+      };
+      const sectionTitle = (text) => {
         doc.moveDown(0.7);
         doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(text);
         hr(doc.y + 4);
         doc.moveDown(0.7);
-      }
-      function kvRow(label, value, colX, labelW = 80, valueW = 190) {
+      };
+      const kvRow = (label, value, colX, labelW = 80, valueW = 190) => {
         doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(`${label}`, colX, doc.y, { width: labelW });
         const yTop = doc.y - 12;
         doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yTop, { width: valueW });
-      }
-
-      // SAFE footer (inside margin; no line break)
-      function drawFooter() {
-        const y = doc.page.height - doc.page.margins.bottom - 10; // inside the margin
-        doc.save();
-        doc.font('Helvetica').fontSize(9).fillColor(MUTED);
-        doc.text(`Page ${doc.page.number}`, L, y, { width: usableWidth, align: 'right', lineBreak: false });
-        doc.restore();
-      }
-      doc.on('pageAdded', drawFooter);
-
-      // header band + logo
-      doc.save(); doc.rect(0, 0, pageWidth, 70).fill(ACCENT); doc.restore();
-      doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth, align: 'left' });
-      doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
-      if (logoBuf) {
-        try { doc.image(logoBuf, R - 140, 12, { fit: [120, 40] }); } catch {}
-      }
-      doc.moveDown(2.2);
+      };
 
       // Client Details
       sectionTitle('Client Details');
@@ -409,11 +383,6 @@ exports.sendSurveyPdf = onRequest(
       if (survey.description) {
         sectionTitle('Survey Notes');
         doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(String(survey.description || ''), { width: usableWidth });
-      }
-
-      function ensureSpace(needed) {
-        const bottom = doc.page.height - doc.page.margins.bottom;
-        if (doc.y + needed > bottom) doc.addPage();
       }
 
       // Signs
@@ -459,7 +428,7 @@ exports.sendSurveyPdf = onRequest(
         }
       }
 
-      // Reference Photos grid
+      // Reference Photos
       const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
       if (refs.length) {
         sectionTitle('Reference Photos');
@@ -498,11 +467,11 @@ exports.sendSurveyPdf = onRequest(
         }
       }
 
-      drawFooter(); // first page
+      // finalize last page
+      drawFooter();
       doc.end();
       const pdfBuf = Buffer.concat(buffers);
 
-      // Send email
       await sgMail.send({
         to,
         from,
@@ -538,7 +507,6 @@ exports.sendSurveyPdf = onRequest(
 );
 
 // ---------- Manual resend endpoint ----------
-// GET .../resendCompletionEmail?jobId=ABC&to=me@x.com&force=true
 exports.resendCompletionEmail = onRequest(
   { secrets: [SENDGRID_API_KEY] },
   async (req, res) => {
@@ -568,9 +536,6 @@ exports.resendCompletionEmail = onRequest(
 
       res.send(`✅ Resent completion email for job ${jobId}`);
     } catch (err) {
-      console.error('❌ resendCompletionEmail failed', {
-        message: err?.message, code: err?.code, body: err?.response?.body
-      });
       const details = err?.response?.body?.errors?.map(e => e.message).join('; ')
         || err?.message || 'Unknown error';
       res.status(500).send(`❌ Failed: ${details}`);
