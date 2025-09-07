@@ -60,6 +60,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     : (job.assignedTo ? [job.assignedTo] : []);
   const assignedNames = assignedIds.map((id) => userMap[id] || id);
 
+  // Hours table
   const timeEntriesSnap = await db.collection('jobs').doc(jobId).collection('timeEntries').get();
   const perUser = {};
   let grandTotal = 0;
@@ -181,11 +182,12 @@ exports.testSendgridMail = onRequest(
 );
 
 // --------------------------------------------------------------------
-// Survey PDF + Email
+// Survey PDF + Email (polished design, safe streaming)
 // --------------------------------------------------------------------
 exports.sendSurveyPdf = onRequest(
   { secrets: [SENDGRID_API_KEY], region: 'us-central1' },
   async (req, res) => {
+    // --- CORS ---
     const origin = req.get('origin') || '';
     const ALLOWED_ORIGINS = [
       'https://install-scheduler.web.app',
@@ -198,6 +200,7 @@ exports.sendSurveyPdf = onRequest(
     if (req.method === 'OPTIONS') {
       res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
       res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.set('Access-Control-Max-Age', '3600');
       return res.status(204).send('');
     }
     if (req.method !== 'POST') return res.status(405).send('Use POST');
@@ -206,6 +209,7 @@ exports.sendSurveyPdf = onRequest(
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
 
+      // Load survey
       const snap = await db.collection('jobs').doc(String(surveyId)).get();
       if (!snap.exists) return res.status(404).send('Survey not found');
 
@@ -217,11 +221,22 @@ exports.sendSurveyPdf = onRequest(
       const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
+      // ---- helpers used during PDF build ----
+      const fetchImageBuf = async (url) => {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) return null;
+          return Buffer.from(await r.arrayBuffer());
+        } catch {
+          return null;
+        }
+      };
+
+      // ---- Generate PDF (await end-of-stream) ----
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString().replace(/\s+/g, '_')}.pdf`;
 
-      // ---- Generate PDF (wait for end event) ----
       const pdfBuf = await new Promise((resolve, reject) => {
         const buffers = [];
         const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: title } });
@@ -229,20 +244,179 @@ exports.sendSurveyPdf = onRequest(
         doc.on('end', () => resolve(Buffer.concat(buffers)));
         doc.on('error', reject);
 
-        doc.fontSize(18).text('SITE SURVEY', { align: 'center' });
-        doc.moveDown();
-        doc.fontSize(12).text(`Client: ${survey.clientName || survey.client || ''}`);
-        doc.text(`Company: ${survey.company || ''}`);
-        doc.text(`Contact: ${survey.contact || ''}`);
-        doc.text(`Phone: ${survey.phone || ''}`);
-        doc.text(`Email: ${survey.email || ''}`);
-        doc.text(`Address: ${survey.address || ''}`);
-        if (survey.description) {
-          doc.moveDown();
-          doc.text(`Notes: ${survey.description}`);
-        }
+        (async () => {
+          try {
+            // ---- styles/metrics ----
+            const ACCENT = '#0E2A47';
+            const MUTED = '#6b7280';
+            const BORDER = '#e5e7eb';
+            const TEXT = '#111827';
+            const SUBTLE = '#f3f4f6';
+            const L = doc.page.margins.left;
+            const pageWidth = doc.page.width;
+            const R = pageWidth - doc.page.margins.right;
+            const usableWidth = R - L;
 
-        doc.end();
+            const hr = (y = doc.y, color = BORDER) => {
+              doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
+            };
+            const sectionTitle = (t) => {
+              doc.moveDown(0.7);
+              doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(t);
+              hr(doc.y + 4);
+              doc.moveDown(0.7);
+            };
+            const kvRow = (label, value, colX, labelW = 80, valueW = 190) => {
+              doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT)
+                .text(label, colX, doc.y, { width: labelW });
+              const yTop = doc.y - 12;
+              doc.font('Helvetica').fontSize(10).fillColor('#111')
+                .text(String(value || '—'), colX + labelW + 8, yTop, { width: valueW });
+            };
+            const ensureSpace = (needed) => {
+              const bottom = doc.page.height - doc.page.margins.bottom;
+              if (doc.y + needed > bottom) doc.addPage();
+            };
+            const drawFooter = () => {
+              const str = `Page ${doc.page.number}`;
+              doc.font('Helvetica').fontSize(9).fillColor(MUTED);
+              doc.text(str, L, doc.page.height - doc.page.margins.bottom + 10, {
+                width: usableWidth, align: 'right'
+              });
+            };
+            doc.on('pageAdded', drawFooter);
+
+            // ---- header band with logo ----
+            doc.save(); doc.rect(0, 0, pageWidth, 70).fill(ACCENT); doc.restore();
+            const logoUrl = 'https://tenderedge.com.au/images/logo-2019.png';
+            const logoBuf = await fetchImageBuf(logoUrl).catch(() => null);
+            doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, {
+              width: usableWidth, align: 'left'
+            });
+            doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
+            if (logoBuf) {
+              try { doc.image(logoBuf, R - 140, 12, { fit: [120, 40] }); } catch {}
+            }
+            doc.moveDown(2.4);
+
+            // ---- Client card ----
+            sectionTitle('Client Details');
+            const cardY = doc.y;
+            const cardH = 92;
+            doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
+            doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).lineWidth(1).strokeColor(BORDER).stroke().restore();
+
+            const col1X = L + 12;
+            const col2X = L + Math.floor(usableWidth / 2) + 12;
+
+            doc.y = cardY + 6;
+            kvRow('Client',  survey.clientName || survey.client, col1X);
+            kvRow('Company', survey.company, col1X);
+            kvRow('Contact', survey.contact, col1X);
+
+            doc.y = cardY + 6;
+            kvRow('Phone',   survey.phone, col2X);
+            kvRow('Email',   survey.email, col2X);
+            kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
+            doc.moveDown(1.4);
+
+            // ---- Survey Notes ----
+            if (survey.description) {
+              sectionTitle('Survey Notes');
+              doc.font('Helvetica').fontSize(10).fillColor(TEXT)
+                .text(String(survey.description || ''), { width: usableWidth });
+            }
+
+            // ---- Survey Signs ----
+            const signsArr = Array.isArray(survey.signs) ? survey.signs : [];
+            if (signsArr.length) {
+              sectionTitle('Survey Signs');
+              for (let i = 0; i < signsArr.length; i++) {
+                const s = signsArr[i] || {};
+                const caption = s.name || `Sign ${i + 1}`;
+                const desc = s.description || '';
+                const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
+
+                const blockH = 20 + (desc ? 36 : 0) + 260 + 18;
+                ensureSpace(blockH);
+
+                doc.font('Helvetica-Bold').fontSize(11).fillColor(TEXT).text(caption);
+                if (desc) {
+                  doc.moveDown(0.15);
+                  doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(desc, { width: usableWidth });
+                }
+
+                if (imgUrl) {
+                  const buf = await fetchImageBuf(imgUrl);
+                  if (buf) {
+                    const imgY = doc.y + 6;
+                    const imgH = 260;
+                    doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
+                    doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
+                    try {
+                      doc.image(buf, L + 6, imgY, { fit: [usableWidth - 12, imgH], align: 'left' });
+                    } catch {
+                      doc.font('Helvetica-Oblique').fontSize(10).fillColor('#b91c1c').text('Image could not be embedded.', L + 12, imgY + 6);
+                    }
+                    doc.moveDown(imgH / 14 + 0.5);
+                  } else {
+                    doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.');
+                  }
+                } else {
+                  doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
+                }
+
+                doc.moveDown(0.6);
+              }
+            }
+
+            // ---- Reference Photos (grid) ----
+            const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+            if (refs.length) {
+              sectionTitle('Reference Photos');
+              const cellW = Math.floor((usableWidth - 20) / 3); // 3 columns + 10px gaps
+              const cellH = 120;
+              const gap = 10;
+              let col = 0;
+              let x = L;
+
+              for (let i = 0; i < refs.length; i++) {
+                ensureSpace(cellH + 16);
+
+                doc.save().rect(x, doc.y, cellW, cellH).fill(SUBTLE).restore();
+                doc.save().rect(x, doc.y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
+
+                const buf = await fetchImageBuf(refs[i]);
+                if (buf) {
+                  try {
+                    doc.image(buf, x + 4, doc.y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
+                  } catch {
+                    doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, doc.y + 6);
+                  }
+                } else {
+                  doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, doc.y + 6);
+                }
+
+                col++;
+                if (col === 3) {
+                  col = 0;
+                  doc.moveDown(cellH / 14 + 0.6);
+                  x = L;
+                } else {
+                  x += cellW + gap;
+                }
+              }
+            }
+
+            // footer on last page and finish
+            drawFooter();
+          } catch (e) {
+            reject(e);
+            return;
+          } finally {
+            doc.end();
+          }
+        })();
       });
 
       // ---- Send email with attachment ----
@@ -251,7 +425,15 @@ exports.sendSurveyPdf = onRequest(
         to,
         from,
         subject: title,
-        html: `<p>Attached is the Site Survey for <strong>${survey.clientName || survey.client || ''}</strong>.</p>`,
+        html: `
+          <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;">
+            <h2 style="margin:0 0 8px;">Site Survey</h2>
+            <div><strong>Client:</strong> ${survey.clientName || survey.client || ''}</div>
+            <div><strong>Company:</strong> ${survey.company || ''}</div>
+            <div><strong>Address:</strong> ${survey.address || ''}</div>
+            <p style="color:#666">Survey ID: ${surveyId}</p>
+          </div>
+        `,
         attachments: [{
           content: pdfBuf.toString('base64'),
           filename: fileName,
