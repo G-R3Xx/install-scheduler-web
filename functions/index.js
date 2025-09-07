@@ -187,6 +187,8 @@ exports.testSendgridMail = onRequest(
 exports.sendSurveyPdf = onRequest(
   { secrets: [SENDGRID_API_KEY], region: 'us-central1' },
   async (req, res) => {
+    const t = (...args) => console.log('[sendSurveyPdf]', new Date().toISOString(), ...args);
+
     // --- CORS ---
     const origin = req.get('origin') || '';
     const ALLOWED_ORIGINS = [
@@ -206,8 +208,11 @@ exports.sendSurveyPdf = onRequest(
     if (req.method !== 'POST') return res.status(405).send('Use POST');
 
     try {
-      const { surveyId, to: toOverride } = req.body || {};
+      const { surveyId, to: toOverride, debug } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
+      const DEBUG_SKIP_IMAGES = String(debug) === '1';
+
+      t('start', { surveyId, DEBUG_SKIP_IMAGES });
 
       // Load survey
       const snap = await db.collection('jobs').doc(String(surveyId)).get();
@@ -218,35 +223,53 @@ exports.sendSurveyPdf = onRequest(
         return res.status(400).send('Not a survey document');
       }
 
+      // Email addresses
       const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // ---- helpers used during PDF build ----
-      const fetchImageBuf = async (url) => {
-        try {
-          const r = await fetch(url);
-          if (!r.ok) return null;
-          return Buffer.from(await r.arrayBuffer());
-        } catch {
-          return null;
-        }
+      // ---- helpers ----
+      const nodeFetch = require('node-fetch'); // ensure we use the v2 import here
+      const fetchWithTimeout = (url, timeoutMs = 8000) => {
+        return new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (!settled) { settled = true; t('img timeout', { url }); resolve(null); }
+          }, timeoutMs);
+          nodeFetch(url).then(async r => {
+            if (settled) return;
+            if (!r.ok) { clearTimeout(timer); settled = true; t('img bad status', { url, status: r.status }); return resolve(null); }
+            const ab = await r.arrayBuffer().catch(() => null);
+            clearTimeout(timer);
+            settled = true;
+            resolve(ab ? Buffer.from(ab) : null);
+          }).catch(err => {
+            if (settled) return;
+            clearTimeout(timer);
+            settled = true;
+            t('img fetch error', { url, err: err?.message });
+            resolve(null);
+          });
+        });
       };
 
-      // ---- Generate PDF (await end-of-stream) ----
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString().replace(/\s+/g, '_')}.pdf`;
 
+      t('pdf:begin');
+
+      // ---- Generate PDF (await end-of-stream) ----
       const pdfBuf = await new Promise((resolve, reject) => {
         const buffers = [];
         const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: title } });
+
         doc.on('data', (b) => buffers.push(b));
-        doc.on('end', () => resolve(Buffer.concat(buffers)));
-        doc.on('error', reject);
+        doc.on('end', () => { t('pdf:end'); resolve(Buffer.concat(buffers)); });
+        doc.on('error', (e) => { t('pdf:error', e?.message); reject(e); });
 
         (async () => {
           try {
-            // ---- styles/metrics ----
+            // style vars
             const ACCENT = '#0E2A47';
             const MUTED = '#6b7280';
             const BORDER = '#e5e7eb';
@@ -260,15 +283,14 @@ exports.sendSurveyPdf = onRequest(
             const hr = (y = doc.y, color = BORDER) => {
               doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
             };
-            const sectionTitle = (t) => {
+            const sectionTitle = (txt) => {
               doc.moveDown(0.7);
-              doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(t);
+              doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(txt);
               hr(doc.y + 4);
               doc.moveDown(0.7);
             };
             const kvRow = (label, value, colX, labelW = 80, valueW = 190) => {
-              doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT)
-                .text(label, colX, doc.y, { width: labelW });
+              doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(label, colX, doc.y, { width: labelW });
               const yTop = doc.y - 12;
               doc.font('Helvetica').fontSize(10).fillColor('#111')
                 .text(String(value || '—'), colX + labelW + 8, yTop, { width: valueW });
@@ -279,27 +301,25 @@ exports.sendSurveyPdf = onRequest(
             };
             const drawFooter = () => {
               const str = `Page ${doc.page.number}`;
-              doc.font('Helvetica').fontSize(9).fillColor(MUTED);
-              doc.text(str, L, doc.page.height - doc.page.margins.bottom + 10, {
-                width: usableWidth, align: 'right'
-              });
+              doc.font('Helvetica').fontSize(9).fillColor(MUTED)
+                .text(str, L, doc.page.height - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
             };
             doc.on('pageAdded', drawFooter);
 
-            // ---- header band with logo ----
+            // header
             doc.save(); doc.rect(0, 0, pageWidth, 70).fill(ACCENT); doc.restore();
-            const logoUrl = 'https://tenderedge.com.au/images/logo-2019.png';
-            const logoBuf = await fetchImageBuf(logoUrl).catch(() => null);
-            doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, {
-              width: usableWidth, align: 'left'
-            });
+            doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth });
             doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
-            if (logoBuf) {
-              try { doc.image(logoBuf, R - 140, 12, { fit: [120, 40] }); } catch {}
+
+            if (!DEBUG_SKIP_IMAGES) {
+              try {
+                const logo = await fetchWithTimeout('https://tenderedge.com.au/images/logo-2019.png', 6000);
+                if (logo) { try { doc.image(logo, R - 140, 12, { fit: [120, 40] }); } catch {} }
+              } catch {}
             }
             doc.moveDown(2.4);
 
-            // ---- Client card ----
+            // client details
             sectionTitle('Client Details');
             const cardY = doc.y;
             const cardH = 92;
@@ -320,17 +340,19 @@ exports.sendSurveyPdf = onRequest(
             kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
             doc.moveDown(1.4);
 
-            // ---- Survey Notes ----
+            // notes
             if (survey.description) {
               sectionTitle('Survey Notes');
               doc.font('Helvetica').fontSize(10).fillColor(TEXT)
                 .text(String(survey.description || ''), { width: usableWidth });
             }
 
-            // ---- Survey Signs ----
+            // signs
             const signsArr = Array.isArray(survey.signs) ? survey.signs : [];
+            t('pdf:signs', { count: signsArr.length });
             if (signsArr.length) {
               sectionTitle('Survey Signs');
+
               for (let i = 0; i < signsArr.length; i++) {
                 const s = signsArr[i] || {};
                 const caption = s.name || `Sign ${i + 1}`;
@@ -346,80 +368,74 @@ exports.sendSurveyPdf = onRequest(
                   doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(desc, { width: usableWidth });
                 }
 
-                if (imgUrl) {
-                  const buf = await fetchImageBuf(imgUrl);
+                if (imgUrl && !DEBUG_SKIP_IMAGES) {
+                  const buf = await fetchWithTimeout(imgUrl, 8000);
                   if (buf) {
                     const imgY = doc.y + 6;
                     const imgH = 260;
                     doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
                     doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
-                    try {
-                      doc.image(buf, L + 6, imgY, { fit: [usableWidth - 12, imgH], align: 'left' });
-                    } catch {
-                      doc.font('Helvetica-Oblique').fontSize(10).fillColor('#b91c1c').text('Image could not be embedded.', L + 12, imgY + 6);
-                    }
+                    try { doc.image(buf, L + 6, imgY, { fit: [usableWidth - 12, imgH] }); }
+                    catch { doc.font('Helvetica-Oblique').fontSize(10).fillColor('#b91c1c').text('Image could not be embedded.', L + 12, imgY + 6); }
                     doc.moveDown(imgH / 14 + 0.5);
                   } else {
                     doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.');
                   }
-                } else {
+                } else if (!imgUrl) {
                   doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
+                } else {
+                  // DEBUG_SKIP_IMAGES
+                  doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('[debug] images skipped');
                 }
 
                 doc.moveDown(0.6);
               }
             }
 
-            // ---- Reference Photos (grid) ----
+            // reference photos
             const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+            t('pdf:refs', { count: refs.length });
             if (refs.length) {
               sectionTitle('Reference Photos');
-              const cellW = Math.floor((usableWidth - 20) / 3); // 3 columns + 10px gaps
+              const cellW = Math.floor((usableWidth - 20) / 3);
               const cellH = 120;
               const gap = 10;
-              let col = 0;
-              let x = L;
+              let col = 0, x = L;
 
               for (let i = 0; i < refs.length; i++) {
                 ensureSpace(cellH + 16);
-
                 doc.save().rect(x, doc.y, cellW, cellH).fill(SUBTLE).restore();
                 doc.save().rect(x, doc.y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
-                const buf = await fetchImageBuf(refs[i]);
-                if (buf) {
-                  try {
-                    doc.image(buf, x + 4, doc.y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
-                  } catch {
-                    doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, doc.y + 6);
+                if (!DEBUG_SKIP_IMAGES) {
+                  const buf = await fetchWithTimeout(refs[i], 8000);
+                  if (buf) {
+                    try { doc.image(buf, x + 4, doc.y + 4, { fit: [cellW - 8, cellH - 8] }); }
+                    catch { doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, doc.y + 6); }
+                  } else {
+                    doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, doc.y + 6);
                   }
                 } else {
-                  doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, doc.y + 6);
+                  doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('[debug] skipped', x + 6, doc.y + 6);
                 }
 
                 col++;
-                if (col === 3) {
-                  col = 0;
-                  doc.moveDown(cellH / 14 + 0.6);
-                  x = L;
-                } else {
-                  x += cellW + gap;
-                }
+                if (col === 3) { col = 0; doc.moveDown(cellH / 14 + 0.6); x = L; }
+                else { x += cellW + gap; }
               }
             }
 
-            // footer on last page and finish
+            // footer + end
             drawFooter();
           } catch (e) {
-            reject(e);
-            return;
+            return reject(e);
           } finally {
             doc.end();
           }
         })();
       });
 
-      // ---- Send email with attachment ----
+      t('email:send');
       sgMail.setApiKey(SENDGRID_API_KEY.value());
       await sgMail.send({
         to,
@@ -442,40 +458,12 @@ exports.sendSurveyPdf = onRequest(
         }],
       });
 
-      console.log('✅ Survey PDF sent', { surveyId, to });
-      res.status(200).send('OK');
+      t('done', { surveyId, to });
+      return res.status(200).send('OK');
     } catch (err) {
-      console.error('❌ sendSurveyPdf failed', err);
-      res.status(500).send(`Failed: ${err.message}`);
+      console.error('[sendSurveyPdf] ❌', err);
+      return res.status(500).send(`Failed: ${err.message}`);
     }
   }
 );
 
-// --------------------------------------------------------------------
-// Manual resend endpoint
-// --------------------------------------------------------------------
-exports.resendCompletionEmail = onRequest(
-  { secrets: [SENDGRID_API_KEY] },
-  async (req, res) => {
-    try {
-      const jobId = (req.query.jobId || req.body?.jobId || '').toString().trim();
-      if (!jobId) return res.status(400).send('Missing jobId');
-
-      const jobRef = db.collection('jobs').doc(jobId);
-      const jobSnap = await jobRef.get();
-      if (!jobSnap.exists) return res.status(404).send(`Job ${jobId} not found`);
-
-      const job = jobSnap.data() || {};
-      await sendCompletionEmail({
-        jobId,
-        job,
-        toOverride: req.query.to || req.body?.to,
-        keyVal: SENDGRID_API_KEY.value(),
-      });
-
-      res.send(`✅ Resent completion email for job ${jobId}`);
-    } catch (err) {
-      res.status(500).send(`❌ Failed: ${err.message}`);
-    }
-  }
-);
