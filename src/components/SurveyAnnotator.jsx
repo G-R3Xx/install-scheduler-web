@@ -1,23 +1,35 @@
 // src/components/SurveyAnnotator.jsx
 import React, {
-  useEffect, useMemo, useRef, useState, useCallback, forwardRef, useImperativeHandle
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  forwardRef,
+  useImperativeHandle,
 } from 'react';
 import {
-  Box, Button, ToggleButton, ToggleButtonGroup, TextField, IconButton, Paper,
+  Box,
+  Button,
+  ToggleButton,
+  ToggleButtonGroup,
+  TextField,
+  IconButton,
+  Paper,
 } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import {
-  Stage, Layer, Image as KImage, Rect, Arrow, Text as KText,
-  Transformer, Group, Label, Tag, Circle,
+  Stage,
+  Layer,
+  Image as KImage,
+  Rect,
+  Arrow,
+  Text as KText,
+  Transformer,
 } from 'react-konva';
 import { v4 as uuid } from 'uuid';
 
-function clientToStagePos(stage, evt) {
-  const rect = stage.container().getBoundingClientRect();
-  const scaleX = stage.width() / rect.width;
-  const scaleY = stage.height() / rect.height;
-  return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
-}
+/* ---------------- helpers ---------------- */
 
 function useResizeObserverSize(ref) {
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -47,12 +59,19 @@ function useLoadedImage(fileOrUrl) {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    setImg(null); setLoaded(false);
+    setImg(null);
+    setLoaded(false);
     if (!objectUrl) return;
     const image = new window.Image();
     image.crossOrigin = 'anonymous';
-    image.onload = () => { setImg(image); setLoaded(true); };
-    image.onerror = () => { setImg(null); setLoaded(false); };
+    image.onload = () => {
+      setImg(image);
+      setLoaded(true);
+    };
+    image.onerror = () => {
+      setImg(null);
+      setLoaded(false);
+    };
     image.src = objectUrl;
     return () => {
       if (fileOrUrl && typeof fileOrUrl !== 'string') URL.revokeObjectURL(objectUrl);
@@ -64,14 +83,18 @@ function useLoadedImage(fileOrUrl) {
 
 const midPoint = (pts) => ({ x: (pts[0] + pts[2]) / 2, y: (pts[1] + pts[3]) / 2 });
 
-const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], onSave }, ref) {
+/* ---------------- component ---------------- */
+
+const SurveyAnnotator = forwardRef(function SurveyAnnotator(
+  { file, tools = [], onSave },
+  ref
+) {
   const stageRef = useRef(null);
   const trRef = useRef(null);
   const containerRef = useRef(null);
 
   const { img: bgImage, loaded: imgLoaded } = useLoadedImage(file);
   const containerSize = useResizeObserverSize(containerRef);
-  const isSmallScreen = typeof window !== 'undefined' ? window.innerWidth <= 600 : false;
 
   const [tool, setTool] = useState('arrow');
   const [color, setColor] = useState('#ff4d4d');
@@ -85,10 +108,10 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
   const [startPt, setStartPt] = useState(null);
   const [stageSize, setStageSize] = useState({ w: 900, h: 600 });
 
-  // start closed; open only when clicking an annotation
+  // explicit properties popover: open only when user hits the button
   const [propsOpen, setPropsOpen] = useState(false);
 
-  // Fit stage
+  // Fit stage to container width
   useEffect(() => {
     if (!imgLoaded || !bgImage || !containerSize.width) return;
     const maxW = containerSize.width;
@@ -99,10 +122,14 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
     });
   }, [imgLoaded, bgImage, containerSize.width]);
 
-  // Reset when new image chosen
-  useEffect(() => { setShapes([]); setSelectedId(null); setPropsOpen(false); }, [file]);
+  // Reset on new image
+  useEffect(() => {
+    setShapes([]);
+    setSelectedId(null);
+    setPropsOpen(false);
+  }, [file]);
 
-  // Delete key
+  // Delete key handling
   useEffect(() => {
     const onKey = (e) => {
       if (!selectedId) return;
@@ -116,53 +143,75 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedId]);
 
-  // Transformer for rect/text
+  // Transformer for rect/text (not arrows)
   useEffect(() => {
-    const tr = trRef.current, stage = stageRef.current;
+    const tr = trRef.current,
+      stage = stageRef.current;
     if (!tr || !stage) return;
     const sel = shapes.find((x) => x.id === selectedId);
-    if (!sel || sel.type === 'arrow') { tr.nodes([]); tr.getLayer()?.batchDraw(); return; }
+    if (!sel || sel.type === 'arrow') {
+      tr.nodes([]);
+      tr.getLayer()?.batchDraw();
+      return;
+    }
     const node = stage.findOne(`#${selectedId}`);
-    tr.nodes(node ? [node] : []); tr.getLayer()?.batchDraw();
+    tr.nodes(node ? [node] : []);
+    tr.getLayer()?.batchDraw();
   }, [selectedId, shapes]);
 
-  const startShape = useCallback((pos) => {
-    const id = uuid();
-    if (tool === 'arrow') {
-      return { id, type: 'arrow', points: [pos.x, pos.y, pos.x, pos.y], color, strokeWidth, measure: null };
-    }
-    if (tool === 'rect') {
-      return {
-        id, type: 'rect',
-        x: pos.x, y: pos.y, width: 0, height: 0,
-        color, strokeWidth, draggable: true,
-        text: '', fontSize,
-        textColor: '#ffffff',
-        fill: '#ff4d4d',
-        fillOpacity: 0.15,
-        cornerRadius: 4,
-      };
-    }
-    if (tool === 'text') {
-      return { id, type: 'text', x: pos.x, y: pos.y, text: '', color, fontSize, draggable: true };
-    }
-    return null;
-  }, [tool, color, strokeWidth, fontSize]);
+  const startShape = useCallback(
+    (pos) => {
+      const id = uuid();
+      if (tool === 'arrow') {
+        return {
+          id,
+          type: 'arrow',
+          points: [pos.x, pos.y, pos.x, pos.y],
+          color,
+          strokeWidth,
+          measure: null,
+        };
+      }
+      if (tool === 'rect') {
+        return {
+          id,
+          type: 'rect',
+          x: pos.x,
+          y: pos.y,
+          width: 0,
+          height: 0,
+          color,
+          strokeWidth,
+          draggable: true,
+          text: '',
+          fontSize,
+          textColor: '#ffffff',
+          fill: '#ff4d4d',
+          fillOpacity: 0.15,
+          cornerRadius: 4,
+        };
+      }
+      if (tool === 'text') {
+        return { id, type: 'text', x: pos.x, y: pos.y, text: '', color, fontSize, draggable: true };
+      }
+      return null;
+    },
+    [tool, color, strokeWidth, fontSize]
+  );
 
-  // Pointer handlers
+  // pointer handlers
   const handlePointerDown = (e) => {
     const stage = e.target.getStage();
     const clickedOnEmpty = e.target === stage;
 
     if (!clickedOnEmpty) {
+      // select node but do NOT auto-open props
       const id = e.target.id?.();
-      if (id) {
-        setSelectedId(id);
-        setPropsOpen(true);
-      }
+      if (id) setSelectedId(id);
       return;
     }
 
+    // clicked empty
     setSelectedId(null);
     setPropsOpen(false);
     if (!bgImage) return;
@@ -173,15 +222,22 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
       const label = window.prompt('Enter text:');
       if (!label) return;
       const id = uuid();
-      setShapes((s) => [...s, { id, type: 'text', x: pos.x, y: pos.y, text: label, fontSize, color, draggable: true }]);
+      setShapes((s) => [
+        ...s,
+        { id, type: 'text', x: pos.x, y: pos.y, text: label, fontSize, color, draggable: true },
+      ]);
       setSelectedId(id);
       return;
     }
 
+    // start drawing arrow/rect
     setIsDrawing(true);
     setStartPt(pos);
     const newShape = startShape(pos);
-    if (newShape) { setShapes((s) => [...s, newShape]); setSelectedId(newShape.id); }
+    if (newShape) {
+      setShapes((s) => [...s, newShape]);
+      setSelectedId(newShape.id);
+    }
   };
 
   const handlePointerMove = (e) => {
@@ -192,7 +248,10 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
       const curr = next[next.length - 1];
       if (!curr) return next;
       if (curr.type === 'arrow') curr.points = [startPt.x, startPt.y, pos.x, pos.y];
-      else if (curr.type === 'rect') { curr.width = pos.x - startPt.x; curr.height = pos.y - startPt.y; }
+      else if (curr.type === 'rect') {
+        curr.width = pos.x - startPt.x;
+        curr.height = pos.y - startPt.y;
+      }
       return next;
     });
   };
@@ -200,6 +259,7 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
   const handlePointerUp = () => {
     setIsDrawing(false);
     setStartPt(null);
+    // keep props closed; only opens on button
   };
 
   const updateSelected = (patch) => {
@@ -207,57 +267,35 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
   };
 
   const onTransformEnd = (e, shape) => {
-    const node = e.target, scaleX = node.scaleX(), scaleY = node.scaleY();
+    const node = e.target,
+      scaleX = node.scaleX(),
+      scaleY = node.scaleY();
     if (shape.type === 'rect') {
       const newAttrs = {
-        x: node.x(), y: node.y(),
+        x: node.x(),
+        y: node.y(),
         width: Math.max(1, node.width() * scaleX),
         height: Math.max(1, node.height() * scaleY),
       };
-      node.scaleX(1); node.scaleY(1);
+      node.scaleX(1);
+      node.scaleY(1);
       updateSelected(newAttrs);
     } else if (shape.type === 'text') {
       updateSelected({ x: node.x(), y: node.y() });
     }
   };
 
-  const Anchor = ({ x, y, onDragMove, onMouseDown }) => (
-    <Circle
-      x={x} y={y} radius={isSmallScreen ? 14 : 10}
-      fill="#00b7ff" stroke="white" strokeWidth={1} draggable
-      onMouseDown={(e) => { e.cancelBubble = true; onMouseDown?.(e); }}
-      onDragMove={(e) => {
-        e.cancelBubble = true;
-        const stage = e.target.getStage();
-        const pos = clientToStagePos(stage, e.evt);
-        e.target.position(pos);
-        onDragMove({ x: pos.x, y: pos.y });
-      }}
-      onDragStart={(e) => { e.cancelBubble = true; }}
-      onDragEnd={(e) => { e.cancelBubble = true; }}
-    />
-  );
-
-  const renderArrowWithAnchors = (s) => {
-    const [x1, y1, x2, y2] = s.points;
+  // anchor-free arrow renderer (measurement prompt on click when empty; double-click to edit)
+  const renderArrow = (s) => {
+    const [x1, y1, x2, y2] = s.points; // eslint-disable-line no-unused-vars
     const mid = midPoint(s.points);
-
-    const setEnd = (which, nx, ny) => {
-      setShapes((arr) => arr.map((sh) => {
-        if (sh.id !== s.id) return sh;
-        const pts = [...sh.points];
-        if (which === 'start') { pts[0] = nx; pts[1] = ny; }
-        else { pts[2] = nx; pts[3] = ny; }
-        return { ...sh, points: pts };
-      }));
-    };
 
     const promptForMeasure = () => {
       const v = window.prompt('Enter measurement (mm):', s.measure != null ? String(s.measure) : '');
       if (v == null) return;
       const n = Number(v);
-      setShapes(arr =>
-        arr.map(sh => (sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh))
+      setShapes((arr) =>
+        arr.map((sh) => (sh.id === s.id ? { ...sh, measure: Number.isFinite(n) ? n : null } : sh))
       );
     };
 
@@ -269,11 +307,13 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
           stroke={s.color}
           fill={s.color}
           strokeWidth={s.strokeWidth}
-          pointerLength={isSmallScreen ? 16 : 12}
-          pointerWidth={isSmallScreen ? 16 : 12}
+          pointerLength={12}
+          pointerWidth={12}
           pointerAtBeginning
-          hitStrokeWidth={isSmallScreen ? 30 : 20}
-          onMouseDown={(e) => { e.cancelBubble = true; }}
+          hitStrokeWidth={20}
+          onMouseDown={(e) => {
+            e.cancelBubble = true;
+          }}
           onClick={(e) => {
             e.cancelBubble = true;
             setSelectedId(s.id);
@@ -290,15 +330,6 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
           }}
         />
 
-        {(selectedId === s.id && s.measure == null) && (
-          <Group x={mid.x} y={mid.y} onMouseDown={(e) => { e.cancelBubble = true; }}>
-            <Label offsetX={14} offsetY={14}>
-              <Tag fill="rgba(0,0,0,0.55)" stroke="#fff" cornerRadius={14} />
-              <KText text="?" fontSize={14} fill="#fff" padding={6} />
-            </Label>
-          </Group>
-        )}
-
         {s.measure != null && (
           <KText
             text={`${s.measure} mm`}
@@ -310,51 +341,52 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
             listening={false}
           />
         )}
-
-        {selectedId === s.id && (
-          <>
-            <Anchor
-              x={x1} y={y1}
-              onMouseDown={() => { setSelectedId(s.id); setPropsOpen(true); }}
-              onDragMove={({ x, y }) => setEnd('start', x, y)}
-            />
-            <Anchor
-              x={x2} y={y2}
-              onMouseDown={() => { setSelectedId(s.id); setPropsOpen(true); }}
-              onDragMove={({ x, y }) => setEnd('end', x, y)}
-            />
-          </>
-        )}
       </>
     );
   };
 
-  // Export snapshot for parent
-  const exportSnapshot = async () => {
-    const stage = stageRef.current;
-    if (!stage) return null;
-    const stageJSON = JSON.parse(stage.toJSON());
-    const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
-    return { stageJSON, annotatedBlob: blob };
-  };
-
-  // expose to parent
-  useImperativeHandle(ref, () => ({ exportSnapshot }));
-
-  // manual save button still available (calls onSave)
+  // save to parent (button)
   const save = async () => {
-    const snap = await exportSnapshot();
-    if (!snap) return;
-    onSave?.(snap);
+    const stage = stageRef.current;
+    if (!stage) return;
+    const stageJSON = stage.toJSON();
+    const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
+    onSave?.({ stageJSON: JSON.parse(stageJSON), annotatedBlob: blob });
     alert('Annotation saved for this sign.');
   };
+
+  // expose exportSnapshot() to parent via ref
+  useImperativeHandle(ref, () => ({
+    exportSnapshot: async () => {
+      const stage = stageRef.current;
+      if (!stage) return null;
+      const stageJSON = stage.toJSON();
+      const blob = await new Promise((res) => stage.toCanvas().toBlob(res, 'image/png'));
+      return { stageJSON: JSON.parse(stageJSON), annotatedBlob: blob };
+    },
+  }));
 
   const selectedShape = shapes.find((s) => s.id === selectedId);
 
   return (
-    <Box ref={containerRef} sx={{ position: 'relative', border: '1px solid rgba(0,0,0,0.12)', borderRadius: 4, p: 0.5 }}>
+    <Box
+      ref={containerRef}
+      sx={{
+        position: 'relative',
+        border: '1px solid rgba(0,0,0,0.12)',
+        borderRadius: 4,
+        p: 0.5,
+      }}
+    >
+      {/* Toolbar */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', p: 0.5 }}>
-        <ToggleButtonGroup size="small" exclusive value={tool} onChange={(_, v) => v && setTool(v)} color="primary">
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={tool}
+          onChange={(_, v) => v && setTool(v)}
+          color="primary"
+        >
           {tools.includes('text') && <ToggleButton value="text">TEXT</ToggleButton>}
           {tools.includes('rect') && <ToggleButton value="rect">RECT</ToggleButton>}
           {tools.includes('arrow') && <ToggleButton value="arrow">↔ ARROW</ToggleButton>}
@@ -362,7 +394,12 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
 
         <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           New color:
-          <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }} />
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            style={{ width: 28, height: 22, padding: 0, border: 'none', background: 'transparent' }}
+          />
         </label>
 
         <TextField
@@ -385,13 +422,35 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
           />
         )}
 
+        <Button
+          size="small"
+          variant="outlined"
+          disabled={!selectedId}
+          onClick={() => setPropsOpen(true)}
+        >
+          Edit selected
+        </Button>
+
         <Button size="small" variant="outlined" onClick={save} sx={{ ml: 'auto' }}>
           Save Annotation
         </Button>
       </Box>
 
+      {/* Canvas */}
       {!imgLoaded && (
-        <Box sx={{ width: '100%', minHeight: 180, display: 'grid', placeItems: 'center', border: '1px dashed rgba(0,0,0,0.2)', borderRadius: 4, color: 'rgba(0,0,0,0.6)', fontSize: 14, p: 1.5 }}>
+        <Box
+          sx={{
+            width: '100%',
+            minHeight: 180,
+            display: 'grid',
+            placeItems: 'center',
+            border: '1px dashed rgba(0,0,0,0.2)',
+            borderRadius: 4,
+            color: 'rgba(0,0,0,0.6)',
+            fontSize: 14,
+            p: 1.5,
+          }}
+        >
           {file ? 'Loading image…' : 'Upload an image to start annotating'}
         </Box>
       )}
@@ -404,7 +463,13 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
-          style={{ width: '100%', height: 'auto', touchAction: 'none', borderRadius: 10, overflow: 'hidden' }}
+          style={{
+            width: '100%',
+            height: 'auto',
+            touchAction: 'none',
+            borderRadius: 10,
+            overflow: 'hidden',
+          }}
         >
           <Layer>
             <KImage image={bgImage} width={stageSize.w} height={stageSize.h} listening={false} />
@@ -420,29 +485,33 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
                   <React.Fragment key={s.id}>
                     <Rect
                       id={s.id}
-                      x={rx} y={ry} width={rw} height={rh}
+                      x={rx}
+                      y={ry}
+                      width={rw}
+                      height={rh}
                       cornerRadius={s.cornerRadius ?? 8}
                       draggable
                       stroke={s.color}
                       strokeWidth={s.strokeWidth}
                       fill={s.color}
                       opacity={s.fillOpacity ?? 0.15}
-                      onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
-                      onTap={() => { setSelectedId(s.id); setPropsOpen(true); }}
+                      onClick={() => setSelectedId(s.id)}
+                      onTap={() => setSelectedId(s.id)}
                       onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                       onTransformEnd={(e) => onTransformEnd(e, s)}
                     />
                     {s.text && (
                       <KText
                         text={s.text}
-                        x={rx + pad} y={ry + pad}
+                        x={rx + pad}
+                        y={ry + pad}
                         width={Math.max(1, rw - pad * 2)}
                         fontSize={s.fontSize || fontSize}
                         fill={s.textColor || '#ffffff'}
                         align="center"
                         wrap="word"
                         listening
-                        onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
+                        onClick={() => setSelectedId(s.id)}
                       />
                     )}
                   </React.Fragment>
@@ -452,18 +521,29 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
               if (s.type === 'text') {
                 return (
                   <KText
-                    id={s.id} key={s.id}
-                    x={s.x} y={s.y} text={s.text}
-                    fontSize={s.fontSize} fill={s.color} draggable
-                    onClick={() => { setSelectedId(s.id); setPropsOpen(true); }}
-                    onTap={() => { setSelectedId(s.id); setPropsOpen(true); }}
+                    id={s.id}
+                    key={s.id}
+                    x={s.x}
+                    y={s.y}
+                    text={s.text}
+                    fontSize={s.fontSize}
+                    fill={s.color}
+                    draggable
+                    onClick={() => setSelectedId(s.id)}
+                    onTap={() => setSelectedId(s.id)}
                     onDragEnd={(e) => updateSelected({ x: e.target.x(), y: e.target.y() })}
                     onTransformEnd={(e) => onTransformEnd(e, s)}
                   />
                 );
               }
 
-              if (s.type === 'arrow') return <React.Fragment key={s.id}>{renderArrowWithAnchors(s)}</React.Fragment>;
+              if (s.type === 'arrow')
+                return (
+                  <React.Fragment key={s.id}>
+                    {renderArrow(s)}
+                  </React.Fragment>
+                );
+
               return null;
             })}
 
@@ -472,6 +552,7 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
         </Stage>
       )}
 
+      {/* Properties popover (manual open) */}
       {selectedShape && propsOpen && (
         <Paper
           elevation={6}
@@ -513,7 +594,9 @@ const SurveyAnnotator = forwardRef(function SurveyAnnotator({ file, tools = [], 
                 type="number"
                 size="small"
                 value={selectedShape.strokeWidth ?? 2}
-                onChange={(e) => updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })}
+                onChange={(e) =>
+                  updateSelected({ strokeWidth: Math.max(1, Number(e.target.value) || 1) })
+                }
                 inputProps={{ min: 1, style: { width: 56 } }}
               />
             )}
