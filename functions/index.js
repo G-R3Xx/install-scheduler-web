@@ -184,49 +184,32 @@ exports.testSendgridMail = onRequest(
 // --------------------------------------------------------------------
 // Survey PDF + Email (polished design, safe streaming)
 // --------------------------------------------------------------------
-// ---------- Email a Survey PDF (client-generated, hardened) ----------
 // ---------- Email a Survey PDF (client-generated) ----------
 exports.sendSurveyPdf = onRequest(
-  { secrets: [SENDGRID_API_KEY], region: 'us-central1' },
+  { secrets: [SENDGRID_API_KEY], region: 'us-central1', timeoutSeconds: 120, memory: '512MiB' },
   async (req, res) => {
-    // ---- CORS: set headers FIRST, always ----
-    try {
-      const origin = req.get('origin') || '';
-      const ALLOWED_ORIGINS = [
-        'https://install-scheduler.web.app',
-        'http://localhost:3000',
-        'http://127.0.0.1:3000',
-      ];
+    // ---- CORS FIRST ----
+    const origin = req.get('origin') || '';
+    const ALLOWED_ORIGINS = [
+      'https://install-scheduler.web.app',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+    ];
+    const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : 'https://install-scheduler.web.app';
+    res.set('Access-Control-Allow-Origin', allowOrigin);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.set('Access-Control-Max-Age', '3600');
 
-      if (ALLOWED_ORIGINS.includes(origin)) {
-        res.set('Access-Control-Allow-Origin', origin);
-      } else {
-        // For dev you can loosen this; for prod remove the wildcard.
-        // res.set('Access-Control-Allow-Origin', '*');
-      }
-      res.set('Vary', 'Origin');
-      res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-      res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      res.set('Access-Control-Max-Age', '3600');
+    if (req.method === 'OPTIONS') return res.status(204).send('');
+    if (req.method !== 'POST')  return res.status(405).send('Use POST');
 
-      if (req.method === 'OPTIONS') {
-        return res.status(204).send('');
-      }
-      if (req.method !== 'POST') {
-        return res.status(405).send('Use POST');
-      }
-    } catch (corsErr) {
-      // If even CORS setup throws, try to at least end gracefully.
-      console.error('CORS setup failed', corsErr);
-      return res.status(500).send('CORS setup failed');
-    }
-
-    // ---- Main logic ----
     try {
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
 
-      // Load survey (stored in jobs collection with jobType === 'survey')
+      // Load survey doc
       const snap = await db.collection('jobs').doc(String(surveyId)).get();
       if (!snap.exists) return res.status(404).send('Survey not found');
 
@@ -237,32 +220,48 @@ exports.sendSurveyPdf = onRequest(
 
       // Configure SendGrid
       sgMail.setApiKey(SENDGRID_API_KEY.value());
-      const to = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
-      const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
+      const to   = toOverride || process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
+      const from =              process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // ---------- Build a polished, branded PDF ----------
+      // ---------- PDF BUILD (robust) ----------
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString()
         .replace(/\s+/g, '_')}.pdf`;
 
+      // Safe fetch with timeout
+      const safeFetchBuf = async (url, ms = 15000) => {
+        if (!url) return null;
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), ms);
+        try {
+          const r = await fetch(url, { signal: ctrl.signal });
+          if (!r.ok) return null;
+          const ab = await r.arrayBuffer();
+          return Buffer.from(ab);
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(t);
+        }
+      };
+
+      // Normalize input arrays
+      const signs = Array.isArray(survey.signs) ? survey.signs : [];
+      const refs  = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+
+      // Start PDF
       const buffers = [];
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 36,
-        info: { Title: title },
-      });
+      const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: title } });
       doc.on('data', (b) => buffers.push(b));
       doc.on('error', (e) => console.error('PDF error', e));
 
-      // ---- Styles & helpers
+      // Styles & helpers
       const ACCENT = '#0E2A47';
-      const MUTED = '#6b7280';
+      const MUTED  = '#6b7280';
       const BORDER = '#e5e7eb';
-      const TEXT = '#111827';
+      const TEXT   = '#111827';
       const SUBTLE = '#f3f4f6';
-      doc.fillColor(TEXT);
-
       const pageWidth = doc.page.width;
       const L = doc.page.margins.left;
       const R = pageWidth - doc.page.margins.right;
@@ -271,25 +270,21 @@ exports.sendSurveyPdf = onRequest(
       const hr = (y = doc.y, color = BORDER) => {
         doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
       };
-
       const sectionTitle = (text) => {
         doc.moveDown(0.7);
         doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(text);
         hr(doc.y + 4);
         doc.moveDown(0.7);
       };
-
       const kvRow = (label, value, colX, labelW = 80, valueW = 190) => {
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(`${label}`, colX, doc.y, {
-          width: labelW,
-          continued: false,
-        });
-        const yTop = doc.y - 12;
-        doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yTop, {
-          width: valueW,
-        });
+        const yStart = doc.y;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(String(label), colX, yStart, { width: labelW });
+        doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yStart, { width: valueW });
       };
-
+      const ensureSpace = (needed) => {
+        const bottom = doc.page.height - doc.page.margins.bottom;
+        if (doc.y + needed > bottom) doc.addPage();
+      };
       const drawFooter = () => {
         const str = `Page ${doc.page.number}`;
         doc.font('Helvetica').fontSize(9).fillColor(MUTED);
@@ -297,90 +292,45 @@ exports.sendSurveyPdf = onRequest(
       };
       doc.on('pageAdded', drawFooter);
 
-      // Header band
-      (function drawHeader() {
-        doc.save();
-        doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
-        doc.restore();
+      // Header band (no async logo fetch to keep PDF fully sync)
+      doc.save();
+      doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
+      doc.restore();
+      doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth, align: 'left' });
+      doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
+      doc.moveDown(2.2);
 
-        const logoUrl = 'https://tenderedge.com.au/images/logo-2019.png';
-        const headerY = 20;
-        doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, headerY, {
-          width: usableWidth,
-          align: 'left',
-        });
-        doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, headerY + 22);
-        doc.moveDown(2.2);
+      // Client card
+      sectionTitle('Client Details');
+      const cardY = doc.y;
+      const cardH = 92;
+      doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
+      doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
-        const yAfterHeader = doc.y;
-        (async () => {
-          try {
-            const r = await fetch(logoUrl);
-            if (!r.ok) return;
-            const logo = Buffer.from(await r.arrayBuffer());
-            const currentPage = doc.page;
-            doc.switchToPage(currentPage.index);
-            const x = R - 140;
-            const y = 12;
-            doc.image(logo, x, y, { fit: [120, 40], align: 'right', valign: 'center' });
-          } catch { /* ignore */ }
-        })().finally(() => {
-          doc.y = yAfterHeader;
-        });
-      })();
+      const col1X = L + 12;
+      const col2X = L + Math.floor(usableWidth / 2) + 12;
 
-      // Client details card
-      (function clientCard() {
-        sectionTitle('Client Details');
+      doc.y = cardY + 6;
+      kvRow('Client',  survey.clientName || survey.client, col1X);
+      kvRow('Company', survey.company, col1X);
+      kvRow('Contact', survey.contact, col1X);
 
-        const cardY = doc.y;
-        const cardH = 92;
-        doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
-        doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).lineWidth(1).strokeColor(BORDER).stroke().restore();
-
-        const col1X = L + 12;
-        const col2X = L + Math.floor(usableWidth / 2) + 12;
-
-        doc.y = cardY + 6;
-        kvRow('Client',  survey.clientName || survey.client, col1X);
-        kvRow('Company', survey.company, col1X);
-        kvRow('Contact', survey.contact, col1X);
-
-        doc.y = cardY + 6;
-        kvRow('Phone',   survey.phone, col2X);
-        kvRow('Email',   survey.email, col2X);
-        kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
-
-        doc.moveDown(1.4);
-      })();
+      doc.y = cardY + 6;
+      kvRow('Phone',   survey.phone,   col2X);
+      kvRow('Email',   survey.email,   col2X);
+      kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
+      doc.moveDown(1.4);
 
       if (survey.description) {
         sectionTitle('Survey Notes');
         doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(String(survey.description || ''), { width: usableWidth });
       }
 
-      const ensureSpace = (needed) => {
-        const bottom = doc.page.height - doc.page.margins.bottom;
-        if (doc.y + needed > bottom) doc.addPage();
-      };
-
-      async function fetchImageBuf(url) {
-        try {
-          const r = await fetch(url);
-          if (!r.ok) return null;
-          return Buffer.from(await r.arrayBuffer());
-        } catch {
-          return null;
-        }
-      }
-
-      // Survey signs
-      const signsArr = Array.isArray(survey.signs) ? survey.signs : [];
-      if (signsArr.length) {
+      // Signs
+      if (signs.length) {
         sectionTitle('Survey Signs');
-
-        for (let i = 0; i < signsArr.length; i++) {
-          const s = signsArr[i] || {};
+        for (let i = 0; i < signs.length; i++) {
+          const s = signs[i] || {};
           const caption = s.name || `Sign ${i + 1}`;
           const desc = s.description || '';
           const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
@@ -395,34 +345,34 @@ exports.sendSurveyPdf = onRequest(
           }
 
           if (imgUrl) {
-            const buf = await fetchImageBuf(imgUrl);
+            const buf = await safeFetchBuf(imgUrl);
+            const imgY = doc.y + 6;
+            const imgH = 260;
+
+            // light frame
+            doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
+            doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
+
             if (buf) {
-              const imgY = doc.y + 6;
-              const imgH = 260;
-              doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
-              doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
               try {
                 doc.image(buf, L + 6, imgY, { fit: [usableWidth - 12, imgH], align: 'left' });
               } catch {
                 doc.font('Helvetica-Oblique').fontSize(10).fillColor('#b91c1c').text('Image could not be embedded.', L + 12, imgY + 6);
               }
-              doc.moveDown(imgH / 14 + 0.5);
             } else {
-              doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.');
+              doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.', L + 12, imgY + 6);
             }
+            doc.moveDown(imgH / 14 + 0.5);
           } else {
             doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
           }
-
           doc.moveDown(0.6);
         }
       }
 
-      // Reference photos
-      const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+      // Reference photos grid
       if (refs.length) {
         sectionTitle('Reference Photos');
-
         const cellW = Math.floor((usableWidth - 20) / 3);
         const cellH = 120;
         const gap = 10;
@@ -432,38 +382,47 @@ exports.sendSurveyPdf = onRequest(
 
         for (let i = 0; i < refs.length; i++) {
           ensureSpace(cellH + 16);
-          const buf = await fetchImageBuf(refs[i]);
+          const y = doc.y;
 
-          doc.save().rect(x, doc.y, cellW, cellH).fill(SUBTLE).restore();
-          doc.save().rect(x, doc.y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
+          // light card
+          doc.save().rect(x, y, cellW, cellH).fill(SUBTLE).restore();
+          doc.save().rect(x, y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
+          const buf = await safeFetchBuf(refs[i]);
           if (buf) {
             try {
-              doc.image(buf, x + 4, doc.y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
+              doc.image(buf, x + 4, y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
             } catch {
-              doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, doc.y + 6);
+              doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, y + 6);
             }
           } else {
-            doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, doc.y + 6);
+            doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, y + 6);
           }
 
+          // advance
           col++;
           if (col === 3) {
             col = 0;
-            doc.moveDown(cellH / 14 + 0.6);
             x = L;
+            doc.moveDown(cellH / 14 + 0.6);
           } else {
             x += cellW + gap;
           }
         }
       }
 
-      // finalize PDF
       drawFooter();
-      doc.end();
-      const pdfBuf = Buffer.concat(buffers);
+      // IMPORTANT: wait for PDF to finish streaming
+      const pdfBuf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        doc.removeAllListeners('data'); // ensure single listener
+        doc.on('data', (b) => chunks.push(b));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        doc.end();
+      });
 
-      // Send email with attachment
+      // Email
       await sgMail.send({
         to,
         from,
@@ -477,29 +436,23 @@ exports.sendSurveyPdf = onRequest(
             <p style="color:#666">Survey ID: ${surveyId}</p>
           </div>
         `,
-        attachments: [
-          {
-            content: pdfBuf.toString('base64'),
-            filename: fileName,
-            type: 'application/pdf',
-            disposition: 'attachment',
-          },
-        ],
+        attachments: [{
+          content: pdfBuf.toString('base64'),
+          filename: fileName,
+          type: 'application/pdf',
+          disposition: 'attachment',
+        }],
       });
 
       console.log('✅ Survey PDF sent', { surveyId, to });
       return res.status(200).send('OK');
     } catch (err) {
       console.error('❌ sendSurveyPdf failed', {
-        message: err?.message,
-        code: err?.code,
-        body: err?.response?.body,
+        message: err?.message, code: err?.code, body: err?.response?.body
       });
       const details =
         err?.response?.body?.errors?.map((e) => e.message).join('; ') ||
-        err?.message ||
-        'Unknown error';
-      // CORS headers already set at top, so this response will be readable by the browser
+        err?.message || 'Unknown error';
       return res.status(500).send(`Failed: ${details}`);
     }
   }
