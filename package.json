@@ -21,6 +21,7 @@
     "date-fns": "^4.1.0",
     "dayjs": "^1.11.13",
     "firebase": "^11.8.1",
+    "firebase-functions": "^6.4.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^3.0.2",
     "konva": "^9.3.22",

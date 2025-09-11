@@ -26,8 +26,63 @@ const esc = (s) =>
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
+const bucket = admin.storage().bucket();
+const isHttp = (u) => /^https?:\/\//i.test(u || '');
+const isGs = (u) => /^gs:\/\//i.test(u || '');
+
+// Convert gs:// or storage path to a signed HTTPS URL (24h)
+async function toHttpUrl(pathOrUrl) {
+  if (!pathOrUrl) return null;
+  if (isHttp(pathOrUrl)) return pathOrUrl;
+
+  let objectPath = pathOrUrl;
+  if (isGs(objectPath)) objectPath = objectPath.replace(/^gs:\/\/[^/]+\//i, '');
+  try {
+    const [signed] = await bucket
+      .file(objectPath)
+      .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 });
+    return signed;
+  } catch (err) {
+    console.warn('Could not sign URL', { objectPath, err: err?.message });
+    return null;
+  }
+}
+async function normalizeMany(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const resolved = await Promise.all(arr.map(toHttpUrl));
+  return resolved.filter(Boolean);
+}
+async function normalizeOne(value) {
+  const url = await toHttpUrl(value);
+  return url || null;
+}
+
+// Safe fetch -> Buffer (with timeout and ceiling)
+async function safeFetchBuf(url, { timeoutMs = 15000, maxBytes = 8 * 1024 * 1024 } = {}) {
+  if (!url) return null;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) return null;
+
+    // If content-length is too big, skip
+    const len = Number(r.headers.get('content-length') || 0);
+    if (len && len > maxBytes) return null;
+
+    const data = await r.arrayBuffer();
+    if (data.byteLength > maxBytes) return null;
+
+    return Buffer.from(data);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // --------------------------------------------------------------------
-// Job completion email (HTML only)
+// Job completion email — HTML + separate attachments (photos + signature)
 // --------------------------------------------------------------------
 async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   sgMail.setApiKey(keyVal);
@@ -53,7 +108,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
       ? job.installDate.toDate()
       : (job.installDate instanceof Date ? job.installDate : null);
     if (d) installDateStr = d.toLocaleString();
-  } catch (_) {}
+  } catch {}
 
   const assignedIds = Array.isArray(job.assignedTo)
     ? job.assignedTo
@@ -86,6 +141,60 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     breakdownRows = `<tr><td colspan="2" style="padding:6px 10px;border:1px solid #ddd;">No hours logged</td></tr>`;
   }
 
+  // ---------- Build attachments (completed photos + signature) ----------
+  const normalizedPhotos = await normalizeMany(job.completedPhotos);
+  const signatureUrl = await normalizeOne(job.signatureURL || job.signatureUrl);
+
+  const MAX_ATTACH = 12;                 // safety: max number of photos
+  const MAX_TOTAL = 22 * 1024 * 1024;    // ~22MB total across attachments
+  const PER_FILE_MAX = 6 * 1024 * 1024;  // ~6MB per file
+  let totalBytes = 0;
+  const attachments = [];
+
+  // Photos
+  for (let i = 0; i < normalizedPhotos.length && attachments.length < MAX_ATTACH; i++) {
+    const url = normalizedPhotos[i];
+    const buf = await safeFetchBuf(url, { maxBytes: PER_FILE_MAX });
+    if (!buf) continue;
+    const nextTotal = totalBytes + buf.length;
+    if (nextTotal > MAX_TOTAL) break;
+    totalBytes = nextTotal;
+
+    // naive mime from url ext (fallback image/jpeg)
+    const lowerUrl = url.toLowerCase();
+    const ext = lowerUrl.match(/\.(jpe?g|png|webp|gif|bmp|heic|tif?)/)?.[1] || 'jpg';
+    const mime =
+      ext.startsWith('png') ? 'image/png' :
+      ext.startsWith('webp') ? 'image/webp' :
+      ext.startsWith('gif') ? 'image/gif' :
+      ext.startsWith('bmp') ? 'image/bmp' :
+      ext.startsWith('heic') ? 'image/heic' :
+      ext.startsWith('tif') ? 'image/tiff' :
+      'image/jpeg';
+
+    const indexStr = String(i + 1).padStart(2, '0');
+    attachments.push({
+      content: buf.toString('base64'),
+      filename: `completed_${indexStr}.${ext === 'jpeg' ? 'jpg' : ext}`,
+      type: mime,
+      disposition: 'attachment',
+    });
+  }
+
+  // Signature
+  if (signatureUrl && attachments.length < MAX_ATTACH) {
+    const sigBuf = await safeFetchBuf(signatureUrl, { maxBytes: PER_FILE_MAX });
+    if (sigBuf && totalBytes + sigBuf.length <= MAX_TOTAL) {
+      attachments.push({
+        content: sigBuf.toString('base64'),
+        filename: 'signature.png',
+        type: 'image/png',
+        disposition: 'attachment',
+      });
+    }
+  }
+
+  // Email HTML
   const html = `
   <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;background:#fff;border:1px solid #eaeaea;border-radius:10px;overflow:hidden;">
     <div style="background:#d6d2d5;padding:20px;text-align:center;">
@@ -114,6 +223,12 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
           </tr>
         </tbody>
       </table>
+
+      ${
+        attachments.length
+          ? `<p style="margin-top:18px;color:#111"><strong>Photos & signature are attached</strong> (${attachments.length} file${attachments.length>1?'s':''}).</p>`
+          : `<p style="margin-top:18px;color:#6b7280"><em>No photos/signature attached.</em></p>`
+      }
     </div>
   </div>
   `;
@@ -123,9 +238,14 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     from: fromAddress,
     subject: `Job Completed — ${clientName}`,
     html,
+    attachments: attachments.length ? attachments : undefined,
   });
 
-  console.log('✅ Completion email sent', { jobId, toAddress });
+  console.log('✅ Completion email sent', {
+    jobId,
+    toAddress,
+    attachments: attachments.length,
+  });
 }
 
 // --------------------------------------------------------------------
@@ -182,20 +302,21 @@ exports.testSendgridMail = onRequest(
 );
 
 // --------------------------------------------------------------------
-// Survey PDF + Email (polished design, safe streaming)
+// Survey PDF + Email (polished layout, pills/grid/page numbers)
 // --------------------------------------------------------------------
-// ---------- Email a Survey PDF (client-generated) ----------
 exports.sendSurveyPdf = onRequest(
   { secrets: [SENDGRID_API_KEY], region: 'us-central1', timeoutSeconds: 120, memory: '512MiB' },
   async (req, res) => {
-    // ---- CORS FIRST ----
+    // ---- CORS ----
     const origin = req.get('origin') || '';
     const ALLOWED_ORIGINS = [
       'https://install-scheduler.web.app',
       'http://localhost:3000',
       'http://127.0.0.1:3000',
     ];
-    const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : 'https://install-scheduler.web.app';
+    const allowOrigin = ALLOWED_ORIGINS.includes(origin)
+      ? origin
+      : 'https://install-scheduler.web.app';
     res.set('Access-Control-Allow-Origin', allowOrigin);
     res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -223,37 +344,28 @@ exports.sendSurveyPdf = onRequest(
       const to   = toOverride || process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
       const from =              process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // ---------- PDF BUILD (robust) ----------
+      // ---------- PDF BUILD ----------
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString()
         .replace(/\s+/g, '_')}.pdf`;
 
-      // Safe fetch with timeout
-      const safeFetchBuf = async (url, ms = 15000) => {
-        if (!url) return null;
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), ms);
-        try {
-          const r = await fetch(url, { signal: ctrl.signal });
-          if (!r.ok) return null;
-          const ab = await r.arrayBuffer();
-          return Buffer.from(ab);
-        } catch {
-          return null;
-        } finally {
-          clearTimeout(t);
-        }
-      };
+      // Safe fetch for images
+      const safeFetch = async (url, ms = 15000, maxBytes = 8 * 1024 * 1024) =>
+        safeFetchBuf(url, { timeoutMs: ms, maxBytes });
 
-      // Normalize input arrays
       const signs = Array.isArray(survey.signs) ? survey.signs : [];
       const refs  = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
 
-      // Start PDF
-      const buffers = [];
-      const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: title } });
-      doc.on('data', (b) => buffers.push(b));
+      const doc = new PDFDocument({
+        size: 'A4',
+        margin: 36,
+        info: { Title: title },
+        bufferPages: true,
+      });
+
+      const chunks = [];
+      doc.on('data', (b) => chunks.push(b));
       doc.on('error', (e) => console.error('PDF error', e));
 
       // Styles & helpers
@@ -262,46 +374,83 @@ exports.sendSurveyPdf = onRequest(
       const BORDER = '#e5e7eb';
       const TEXT   = '#111827';
       const SUBTLE = '#f3f4f6';
-      const pageWidth = doc.page.width;
+      const pageWidth  = doc.page.width;
+      const pageHeight = doc.page.height;
       const L = doc.page.margins.left;
       const R = pageWidth - doc.page.margins.right;
       const usableWidth = R - L;
 
-      const hr = (y = doc.y, color = BORDER) => {
-        doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
+      const pill = (label) => {
+        const paddingX = 10;
+        const paddingY = 4;
+        doc.font('Helvetica-Bold').fontSize(11);
+        const w = doc.widthOfString(label);
+        const h = doc.currentLineHeight();
+        const boxW = Math.ceil(w + paddingX * 2);
+        const boxH = Math.ceil(h + paddingY * 2);
+        const x = L;
+        const y = doc.y;
+
+        doc.save().roundedRect(x, y, boxW, boxH, 10).fill(SUBTLE).restore();
+        doc.save().roundedRect(x, y, boxW, boxH, 10).lineWidth(1).strokeColor(BORDER).stroke().restore();
+        doc.fillColor(TEXT).text(label, x + paddingX, y + paddingY);
+        doc.moveDown(0.8);
       };
-      const sectionTitle = (text) => {
-        doc.moveDown(0.7);
-        doc.font('Helvetica-Bold').fontSize(12).fillColor(TEXT).text(text);
-        hr(doc.y + 4);
-        doc.moveDown(0.7);
-      };
-      const kvRow = (label, value, colX, labelW = 80, valueW = 190) => {
+
+      const sectionTitle = (text) => pill(text);
+
+      const kvRow = (label, value, colX, labelW = 82, valueW = 200) => {
         const yStart = doc.y;
         doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(String(label), colX, yStart, { width: labelW });
         doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yStart, { width: valueW });
       };
+
       const ensureSpace = (needed) => {
-        const bottom = doc.page.height - doc.page.margins.bottom;
+        const bottom = pageHeight - doc.page.margins.bottom;
         if (doc.y + needed > bottom) doc.addPage();
       };
-      const drawFooter = () => {
-        const str = `Page ${doc.page.number}`;
+
+      const footerAt = (pageIndex, total) => {
+        const saveIndex = doc.page.index;
+        doc.switchToPage(pageIndex);
+        const label = `Page ${pageIndex + 1} of ${total}`;
         doc.font('Helvetica').fontSize(9).fillColor(MUTED);
-        doc.text(str, L, doc.page.height - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
+        doc.text(label, L, pageHeight - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
+        doc.switchToPage(saveIndex);
       };
-      doc.on('pageAdded', drawFooter);
 
-      // Header band (no async logo fetch to keep PDF fully sync)
-      doc.save();
-      doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
-      doc.restore();
-      doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth, align: 'left' });
-      doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
-      doc.moveDown(2.2);
+      // Header band + Survey ID chip
+      (function header() {
+        doc.save();
+        doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
+        doc.restore();
 
-      // Client card
+        // Title / date
+        doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 18, { width: usableWidth - 160, align: 'left' });
+        doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 40);
+
+        // Survey ID chip (right)
+        const idText = `Survey ID: ${String(surveyId)}`;
+        doc.font('Helvetica-Bold').fontSize(9);
+        const tw = doc.widthOfString(idText);
+        const th = doc.currentLineHeight();
+        const padX = 8, padY = 4;
+        const chipW = tw + padX * 2;
+        const chipH = th + padY * 2;
+        const chipX = R - chipW;
+        const chipY = 20;
+
+        doc.save().roundedRect(chipX, chipY, chipW, chipH, 12).fill('#1f2937').restore();
+        doc.fillColor('#fff').text(idText, chipX + padX, chipY + padY);
+
+        // move content below header
+        doc.y = 70 + 12;
+        doc.fillColor(TEXT);
+      })();
+
+      // Client Details
       sectionTitle('Client Details');
+
       const cardY = doc.y;
       const cardH = 92;
       doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
@@ -318,24 +467,27 @@ exports.sendSurveyPdf = onRequest(
       doc.y = cardY + 6;
       kvRow('Phone',   survey.phone,   col2X);
       kvRow('Email',   survey.email,   col2X);
-      kvRow('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
-      doc.moveDown(1.4);
+      kvRow('Address', survey.address, col2X, 82, Math.min(usableWidth / 2 - 60, 240));
+      doc.moveDown(1.2);
 
+      // Survey Notes
       if (survey.description) {
         sectionTitle('Survey Notes');
         doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(String(survey.description || ''), { width: usableWidth });
+        doc.moveDown(0.4);
       }
 
-      // Signs
+      // Survey Signs
       if (signs.length) {
         sectionTitle('Survey Signs');
+
         for (let i = 0; i < signs.length; i++) {
           const s = signs[i] || {};
           const caption = s.name || `Sign ${i + 1}`;
           const desc = s.description || '';
           const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
 
-          const blockH = 20 + (desc ? 36 : 0) + 260 + 18;
+          const blockH = 20 + (desc ? 36 : 0) + 260 + 16;
           ensureSpace(blockH);
 
           doc.font('Helvetica-Bold').fontSize(11).fillColor(TEXT).text(caption);
@@ -345,11 +497,10 @@ exports.sendSurveyPdf = onRequest(
           }
 
           if (imgUrl) {
-            const buf = await safeFetchBuf(imgUrl);
+            const buf = await safeFetch(imgUrl);
             const imgY = doc.y + 6;
             const imgH = 260;
 
-            // light frame
             doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
             doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
@@ -362,33 +513,39 @@ exports.sendSurveyPdf = onRequest(
             } else {
               doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.', L + 12, imgY + 6);
             }
-            doc.moveDown(imgH / 14 + 0.5);
+
+            doc.moveDown(imgH / 14 + 0.3);
           } else {
             doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
           }
-          doc.moveDown(0.6);
+          doc.moveDown(0.4);
         }
       }
 
-      // Reference photos grid
+      // Reference Photos – 3-column grid, tiny captions
       if (refs.length) {
         sectionTitle('Reference Photos');
-        const cellW = Math.floor((usableWidth - 20) / 3);
-        const cellH = 120;
+
+        const cols = 3;
         const gap = 10;
+        const cellW = Math.floor((usableWidth - gap * (cols - 1)) / cols);
+        const cellH = 120;
 
         let col = 0;
-        let x = L;
+        let rowY = doc.y;
 
         for (let i = 0; i < refs.length; i++) {
-          ensureSpace(cellH + 16);
-          const y = doc.y;
+          if (col === 0) {
+            ensureSpace(cellH + 22);
+            rowY = doc.y;
+          }
+          const x = L + col * (cellW + gap);
+          const y = rowY;
 
-          // light card
           doc.save().rect(x, y, cellW, cellH).fill(SUBTLE).restore();
           doc.save().rect(x, y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
-          const buf = await safeFetchBuf(refs[i]);
+          const buf = await safeFetch(refs[i]);
           if (buf) {
             try {
               doc.image(buf, x + 4, y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
@@ -399,26 +556,33 @@ exports.sendSurveyPdf = onRequest(
             doc.font('Helvetica-Oblique').fontSize(9).fillColor(MUTED).text('Unavailable', x + 6, y + 6);
           }
 
-          // advance
+          doc.font('Helvetica').fontSize(9).fillColor(MUTED)
+            .text(`Ref #${i + 1}`, x, y + cellH + 4, { width: cellW, align: 'center' });
+
           col++;
-          if (col === 3) {
+          if (col === cols) {
             col = 0;
-            x = L;
-            doc.moveDown(cellH / 14 + 0.6);
-          } else {
-            x += cellW + gap;
+            doc.y = y + cellH + 18;
           }
+        }
+        if (col !== 0) {
+          doc.y = rowY + cellH + 18;
         }
       }
 
-      drawFooter();
-      // IMPORTANT: wait for PDF to finish streaming
-      const pdfBuf = await new Promise((resolve, reject) => {
-        const chunks = [];
-        doc.removeAllListeners('data'); // ensure single listener
-        doc.on('data', (b) => chunks.push(b));
+      // Page numbers (buffered)
+      const range = doc.bufferedPageRange();
+      for (let i = 0; i < range.count; i++) {
+        const saveIndex = doc.page.index;
+        doc.switchToPage(range.start + i);
+        const label = `Page ${i + 1} of ${range.count}`;
+        doc.font('Helvetica').fontSize(9).fillColor('#6b7280');
+        doc.text(label, L, pageHeight - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
+        doc.switchToPage(saveIndex);
+      }
+
+      const pdfBuf = await new Promise((resolve) => {
         doc.on('end', () => resolve(Buffer.concat(chunks)));
-        doc.on('error', reject);
         doc.end();
       });
 
