@@ -5,42 +5,18 @@ const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
 
-// ---- Admin / SendGrid / Fetch ----
+// ---- Admin / SendGrid ----
 const admin = require('firebase-admin');
 const sgMail = require('@sendgrid/mail');
-const fetch = require('node-fetch'); // v2
 
-// Initialize Admin
+// Initialize Admin (use your default bucket)
 admin.initializeApp({ storageBucket: 'install-scheduler.appspot.com' });
 const db = admin.firestore();
 
-// Secrets
-// set with: firebase functions:secrets:set SENDGRID_API_KEY
+// Secret set with: firebase functions:secrets:set SENDGRID_API_KEY
 const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY');
 
-// --------------------------------------------------------------------
-// Mail identity & preferences (to avoid "looks unsafe")
-// --------------------------------------------------------------------
-// Use a neutral "from" on your authenticated domain; keep your real inbox in replyTo
-const FROM_ADDRESS = process.env.SENDGRID_FROM || 'no-reply@tenderedge.com.au';
-const REPLY_TO = process.env.SENDGRID_REPLY_TO || 'printroom@tenderedge.com.au';
-const TO_DEFAULT = process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
-
-// Optional: disable SendGrid tracking until Link Branding (CNAME) is set up.
-// Set SENDGRID_DISABLE_TRACKING=1 in your env to honor this.
-const DISABLE_TRACKING =
-  String(process.env.SENDGRID_DISABLE_TRACKING || '0').trim() === '1';
-
-const baseMailSettings = DISABLE_TRACKING
-  ? {
-      clickTracking: { enable: false, enableText: false },
-      openTracking: { enable: false },
-    }
-  : undefined;
-
-// --------------------------------------------------------------------
-// Helpers
-// --------------------------------------------------------------------
+// ---- Helpers ----
 const lower = (s) => (s || '').toString().toLowerCase().trim();
 const esc = (s) =>
   String(s || '')
@@ -48,43 +24,8 @@ const esc = (s) =>
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
-const bucket = admin.storage().bucket();
-const isHttp = (u) => /^https?:\/\//i.test(u || '');
-const isGs = (u) => /^gs:\/\//i.test(u || '');
-
-// Convert gs:// or storage path to a signed URL; pass-through http(s) URLs
-async function toHttpUrl(pathOrUrl) {
-  if (!pathOrUrl) return null;
-  if (isHttp(pathOrUrl)) return pathOrUrl;
-
-  // Extract object path from gs:// or accept a bare storage path
-  let objectPath = pathOrUrl;
-  if (isGs(objectPath)) {
-    objectPath = objectPath.replace(/^gs:\/\/[^/]+\//i, '');
-  }
-
-  try {
-    const [signed] = await bucket
-      .file(objectPath)
-      .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 }); // 24h
-    return signed;
-  } catch (err) {
-    console.warn('Could not sign URL', { objectPath, err: err?.message });
-    return null;
-  }
-}
-
-async function normalizeMany(list) {
-  const arr = Array.isArray(list) ? list : [];
-  const resolved = await Promise.all(arr.map(toHttpUrl));
-  return resolved.filter(Boolean);
-}
-async function normalizeOne(value) {
-  const url = await toHttpUrl(value);
-  return url || null;
-}
-
-// Fetch remote URL to Buffer (with timeout)
+// Safe HTTP fetch for binary buffers with timeout
+const fetch = require('node-fetch'); // v2
 async function safeFetchBuf(url, ms = 15000) {
   if (!url) return null;
   const ctrl = new AbortController();
@@ -92,8 +33,10 @@ async function safeFetchBuf(url, ms = 15000) {
   try {
     const r = await fetch(url, { signal: ctrl.signal });
     if (!r.ok) return null;
+    const ct = r.headers.get('content-type') || '';
     const ab = await r.arrayBuffer();
-    return Buffer.from(ab);
+    const buf = Buffer.from(ab);
+    return { buf, contentType: ct };
   } catch {
     return null;
   } finally {
@@ -101,13 +44,25 @@ async function safeFetchBuf(url, ms = 15000) {
   }
 }
 
+function pickExtFromContentType(ct = '') {
+  const type = ct.split(';')[0].trim().toLowerCase();
+  if (type === 'image/png') return { ext: 'png', type };
+  if (type === 'image/webp') return { ext: 'webp', type };
+  if (type === 'image/gif') return { ext: 'gif', type };
+  if (type === 'image/bmp') return { ext: 'bmp', type };
+  if (type === 'image/tiff') return { ext: 'tiff', type };
+  // default jpeg
+  return { ext: 'jpg', type: type || 'image/jpeg' };
+}
+
 // --------------------------------------------------------------------
-// Job completion email (HTML only; keep your existing content/format)
+// Completed Job email (HTML + image & signature attachments)
 // --------------------------------------------------------------------
 async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   sgMail.setApiKey(keyVal);
 
-  const toAddress = toOverride || TO_DEFAULT;
+  const toAddress = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
+  const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
   // Build user map
   const usersSnap = await db.collection('users').get();
@@ -192,20 +147,63 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   </div>
   `;
 
+  // Attach completed photos + signature (with size limits)
+  const completedPhotos = Array.isArray(job.completedPhotos) ? job.completedPhotos : [];
+  const signatureUrl = job.signatureURL || job.signatureUrl || null;
+
+  const attachments = [];
+  let totalBytes = 0;
+  const MAX_TOTAL = 20 * 1024 * 1024; // ~20MB total to be safe
+  const MAX_EACH  = 6 * 1024 * 1024;  // ~6MB per image
+
+  const pushAttachment = (filename, payload) => {
+    if (!payload) return;
+    const { buf, contentType } = payload;
+    if (!buf || !buf.length) return;
+    if (buf.length > MAX_EACH) return;
+    if (totalBytes + buf.length > MAX_TOTAL) return;
+    const { type } = pickExtFromContentType(contentType);
+    attachments.push({
+      filename,
+      content: buf.toString('base64'),
+      type: type || 'application/octet-stream',
+      disposition: 'attachment',
+    });
+    totalBytes += buf.length;
+  };
+
+  for (let i = 0; i < completedPhotos.length; i++) {
+    const url = completedPhotos[i];
+    const payload = await safeFetchBuf(url);
+    const { ext } = pickExtFromContentType(payload?.contentType);
+    pushAttachment(`completed-${i + 1}.${ext}`, payload);
+  }
+
+  if (signatureUrl) {
+    const payload = await safeFetchBuf(signatureUrl);
+    const { ext } = pickExtFromContentType(payload?.contentType);
+    pushAttachment(`signature.${ext}`, payload);
+  }
+
   await sgMail.send({
     to: toAddress,
-    from: FROM_ADDRESS,
-    replyTo: REPLY_TO,
+    from: fromAddress,
     subject: `Job Completed — ${clientName}`,
     html,
-    mailSettings: baseMailSettings,
+    attachments,
   });
 
-  console.log('✅ Completion email sent', { jobId, toAddress });
+  console.log('✅ Completion email sent', {
+    jobId,
+    toAddress,
+    photos: completedPhotos.length,
+    hasSignature: !!signatureUrl,
+    attachments: attachments.length
+  });
 }
 
 // --------------------------------------------------------------------
-// Firestore trigger: send completion email
+// Firestore trigger: send completion email once status becomes complete
 // --------------------------------------------------------------------
 exports.sendJobCompletedEmail = onDocumentWritten(
   { document: 'jobs/{jobId}', secrets: [SENDGRID_API_KEY] },
@@ -219,6 +217,7 @@ exports.sendJobCompletedEmail = onDocumentWritten(
 
     const isNowCompleted = after && (afterStatus === 'complete' || afterStatus === 'completed');
     if (!isNowCompleted) return;
+
     const wasCompleted = before && (beforeStatus === 'complete' || beforeStatus === 'completed');
     if (wasCompleted) return;
 
@@ -235,66 +234,20 @@ exports.sendJobCompletedEmail = onDocumentWritten(
 );
 
 // --------------------------------------------------------------------
-/** Manual resend endpoint
- * GET/POST .../resendCompletionEmail?jobId=ABC&to=me@x.com&force=true
- */
-// --------------------------------------------------------------------
-exports.resendCompletionEmail = onRequest(
-  { secrets: [SENDGRID_API_KEY] },
-  async (req, res) => {
-    try {
-      const jobId = (req.query.jobId || req.body?.jobId || '').toString().trim();
-      const toOverride = (req.query.to || req.body?.to || '').toString().trim();
-      const force = ((req.query.force || req.body?.force || '') + '').toLowerCase() === 'true';
-
-      if (!jobId) return res.status(400).send('Missing jobId');
-
-      const jobRef = db.collection('jobs').doc(jobId);
-      const jobSnap = await jobRef.get();
-      if (!jobSnap.exists) return res.status(404).send(`Job ${jobId} not found`);
-
-      const job = jobSnap.data() || {};
-      const status = lower(job.status);
-      if (!force && status !== 'complete' && status !== 'completed') {
-        return res.status(400).send(`Job status is "${status}". Append &force=true to override.`);
-      }
-
-      await sendCompletionEmail({
-        jobId,
-        job,
-        toOverride,
-        keyVal: SENDGRID_API_KEY.value(),
-      });
-
-      res.send(`✅ Resent completion email for job ${jobId}`);
-    } catch (err) {
-      console.error('❌ resendCompletionEmail failed', {
-        message: err?.message, code: err?.code, body: err?.response?.body
-      });
-      const details =
-        err?.response?.body?.errors?.map(e => e.message).join('; ')
-        || err?.message || 'Unknown error';
-      res.status(500).send(`❌ Failed: ${details}`);
-    }
-  }
-);
-
-// --------------------------------------------------------------------
-// Test endpoint
+// HTTPS: Test SendGrid
 // --------------------------------------------------------------------
 exports.testSendgridMail = onRequest(
   { secrets: [SENDGRID_API_KEY] },
   async (_req, res) => {
     try {
       sgMail.setApiKey(SENDGRID_API_KEY.value());
-      const to = TO_DEFAULT;
+      const to = process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
+      const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
       await sgMail.send({
         to,
-        from: FROM_ADDRESS,
-        replyTo: REPLY_TO,
+        from,
         subject: '🔥 Test Email from Firebase',
         html: '<h2>SendGrid works</h2>',
-        mailSettings: baseMailSettings,
       });
       res.send(`✅ Test email sent to ${to}`);
     } catch (err) {
@@ -304,20 +257,27 @@ exports.testSendgridMail = onRequest(
 );
 
 // --------------------------------------------------------------------
-// Survey email endpoint (keeps your existing URL: /sendSurveyPdf)
-// Sends a styled HTML email; attach sign/reference images if desired.
+// HTTPS: "sendSurveyPdf" (kept name) — now sends a styled HTML email
+//        and attaches survey images (signs + reference) instead of PDF.
 // --------------------------------------------------------------------
 exports.sendSurveyPdf = onRequest(
-  { secrets: [SENDGRID_API_KEY], region: 'us-central1', timeoutSeconds: 120, memory: '512MiB' },
+  {
+    secrets: [SENDGRID_API_KEY],
+    region: 'us-central1',
+    timeoutSeconds: 120,
+    memory: '512MiB',
+  },
   async (req, res) => {
-    // ---- CORS ----
+    // ---- CORS FIRST ----
     const origin = req.get('origin') || '';
     const ALLOWED_ORIGINS = [
       'https://install-scheduler.web.app',
       'http://localhost:3000',
       'http://127.0.0.1:3000',
     ];
-    const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : 'https://install-scheduler.web.app';
+    const allowOrigin = ALLOWED_ORIGINS.includes(origin)
+      ? origin
+      : 'https://install-scheduler.web.app';
     res.set('Access-Control-Allow-Origin', allowOrigin);
     res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -331,7 +291,7 @@ exports.sendSurveyPdf = onRequest(
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
 
-      // Load survey doc (stored in jobs with jobType === 'survey')
+      // Load survey
       const snap = await db.collection('jobs').doc(String(surveyId)).get();
       if (!snap.exists) return res.status(404).send('Survey not found');
 
@@ -340,89 +300,130 @@ exports.sendSurveyPdf = onRequest(
         return res.status(400).send('Document is not a survey');
       }
 
-      // SendGrid
+      // Configure SendGrid
       sgMail.setApiKey(SENDGRID_API_KEY.value());
-      const to   = toOverride || TO_DEFAULT;
+      const to   = toOverride || process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
+      const from =              process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // Build HTML summary (clean & simple)
-      const client = survey.clientName || survey.client || '';
-      const html = `
-        <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; max-width:760px; margin:0 auto;">
-          <div style="background:#0E2A47;color:#fff;padding:14px 18px;border-radius:10px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-              <div>
-                <div style="font-weight:700;font-size:16px;letter-spacing:.2px;">SITE SURVEY</div>
-                <div style="opacity:.9;font-size:12px;margin-top:2px;">Survey ID: ${surveyId}</div>
-              </div>
-              <img src="https://tenderedge.com.au/images/logo-2019.png" alt="Logo" style="height:28px;">
-            </div>
-          </div>
-
-          <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;margin-top:12px;overflow:hidden;">
-            <div style="padding:16px 18px;">
-              <h2 style="margin:0 0 8px 0;font-size:18px;color:#0E2A47;">${esc(client || 'Untitled')}</h2>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;color:#111;">
-                <div><strong>Company:</strong> ${esc(survey.company || '—')}</div>
-                <div><strong>Contact:</strong> ${esc(survey.contact || '—')}</div>
-                <div><strong>Phone:</strong> ${esc(survey.phone || '—')}</div>
-                <div><strong>Email:</strong> ${esc(survey.email || '—')}</div>
-                <div style="grid-column:1 / -1;"><strong>Address:</strong> ${esc(survey.address || '—')}</div>
-              </div>
-              ${survey.description ? `
-                <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #e5e7eb;">
-                  <div style="font-weight:600;margin-bottom:4px;color:#374151;">Notes</div>
-                  <div style="white-space:pre-wrap;color:#111;font-size:13px;">${esc(survey.description)}</div>
-                </div>` : ''}
-            </div>
-          </div>
-
-          <p style="color:#6b7280;font-size:12px;margin-top:10px;">
-            Images are attached to this email (annotated signs first, then reference photos).
-          </p>
-        </div>
-      `;
-
-      // Build attachments (annotated signs then reference photos)
-      const attachments = [];
-
+      // Normalize arrays
       const signs = Array.isArray(survey.signs) ? survey.signs : [];
+      const referencePhotos = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+
+      // Build a neat HTML summary (no embedded images, just info)
+      const clientName = survey.clientName || survey.client || 'Untitled';
+      const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;background:#fff;border:1px solid #eaeaea;border-radius:10px;overflow:hidden;">
+        <div style="background:#0E2A47;padding:16px 20px;color:#fff;display:flex;align-items:center;justify-content:space-between;">
+          <div>
+            <div style="font-weight:700;font-size:16px;letter-spacing:.3px;">SITE SURVEY</div>
+            <div style="font-size:12px;opacity:.9;">${new Date().toLocaleString()}</div>
+          </div>
+          <div style="background:#0b2240;padding:4px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,.2);">
+            Survey ID: ${surveyId}
+          </div>
+        </div>
+
+        <div style="padding:20px;">
+          <h2 style="margin:0 0 10px;color:#111827;">${esc(clientName)}</h2>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 18px;max-width:620px;font-size:14px;">
+            <div><strong>Company:</strong> ${esc(survey.company || '')}</div>
+            <div><strong>Contact:</strong> ${esc(survey.contact || '')}</div>
+            <div><strong>Phone:</strong> ${esc(survey.phone || '')}</div>
+            <div><strong>Email:</strong> ${esc(survey.email || '')}</div>
+            <div style="grid-column:1 / -1;"><strong>Address:</strong> ${esc(survey.address || '')}</div>
+          </div>
+
+          ${
+            survey.description
+              ? `<div style="margin-top:14px;padding:12px 14px;border:1px solid #e5e7eb;border-radius:8px;background:#f9fafb;">
+                   <div style="font-weight:600;margin-bottom:6px;">Survey Notes</div>
+                   <div style="white-space:pre-wrap;">${esc(survey.description || '')}</div>
+                 </div>`
+              : ''
+          }
+
+          <div style="margin-top:18px;">
+            <div style="font-weight:700;margin-bottom:8px;">Signs</div>
+            ${
+              signs.length
+                ? `<ol style="margin:0 0 0 18px;padding:0;">
+                     ${signs.map((s, idx) => {
+                       const name = s?.name || `Sign ${idx + 1}`;
+                       const desc = s?.description ? ` — ${esc(s.description)}` : '';
+                       return `<li style="margin:3px 0;">${esc(name)}${desc}</li>`;
+                     }).join('')}
+                   </ol>`
+                : '<div style="color:#6b7280;">No signs captured.</div>'
+            }
+          </div>
+
+          <div style="margin-top:16px;">
+            <div style="font-weight:700;margin-bottom:8px;">Reference Photos</div>
+            <div style="font-size:14px;color:#6b7280;">
+              ${referencePhotos.length ? `${referencePhotos.length} photo(s) attached below.` : 'No reference photos.'}
+            </div>
+          </div>
+
+          <hr style="margin:22px 0;border:none;border-top:1px solid #eee;">
+          <div style="text-align:center;color:#6b7280;font-size:12px;">Survey ID: ${surveyId}</div>
+        </div>
+      </div>`;
+
+      // Build attachments for signs (annotated first) and reference photos
+      const attachments = [];
+      let totalBytes = 0;
+      const MAX_TOTAL = 20 * 1024 * 1024; // ~20MB
+      const MAX_EACH  = 6 * 1024 * 1024;  // ~6MB
+
+      const pushAttachment = (filename, payload) => {
+        if (!payload) return;
+        const { buf, contentType } = payload;
+        if (!buf || !buf.length) return;
+        if (buf.length > MAX_EACH) return;
+        if (totalBytes + buf.length > MAX_TOTAL) return;
+        const { type } = pickExtFromContentType(contentType);
+        attachments.push({
+          filename,
+          content: buf.toString('base64'),
+          type: type || 'application/octet-stream',
+          disposition: 'attachment',
+        });
+        totalBytes += buf.length;
+      };
+
+      // Signs
       for (let i = 0; i < signs.length; i++) {
         const s = signs[i] || {};
         const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
-        const buf = await safeFetchBuf(imgUrl);
-        if (!buf) continue;
-        attachments.push({
-          content: buf.toString('base64'),
-          filename: `sign_${(s.name || `Sign_${i+1}`).replace(/\s+/g, '_')}.jpg`,
-          type: 'image/jpeg',
-          disposition: 'attachment',
-        });
+        if (!imgUrl) continue;
+        const payload = await safeFetchBuf(imgUrl);
+        const { ext } = pickExtFromContentType(payload?.contentType);
+        pushAttachment(`sign-${i + 1}.${ext}`, payload);
       }
 
-      const refs = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
-      for (let i = 0; i < refs.length; i++) {
-        const buf = await safeFetchBuf(refs[i]);
-        if (!buf) continue;
-        attachments.push({
-          content: buf.toString('base64'),
-          filename: `reference_${i+1}.jpg`,
-          type: 'image/jpeg',
-          disposition: 'attachment',
-        });
+      // Reference photos
+      for (let i = 0; i < referencePhotos.length; i++) {
+        const url = referencePhotos[i];
+        const payload = await safeFetchBuf(url);
+        const { ext } = pickExtFromContentType(payload?.contentType);
+        pushAttachment(`reference-${i + 1}.${ext}`, payload);
       }
 
-      // Send email
       await sgMail.send({
         to,
-        from: FROM_ADDRESS,
-        replyTo: REPLY_TO,
-        subject: `Site Survey — ${client || surveyId}`,
+        from,
+        subject: `Site Survey — ${clientName}`,
         html,
-        attachments: attachments.length ? attachments : undefined,
-        mailSettings: baseMailSettings,
+        attachments,
       });
 
-      console.log('✅ Survey email sent', { surveyId, to, attachments: attachments.length });
+      console.log('✅ Survey email sent (HTML + attachments)', {
+        surveyId,
+        signs: signs.length,
+        refs: referencePhotos.length,
+        attachments: attachments.length,
+      });
       return res.status(200).send('OK');
     } catch (err) {
       console.error('❌ sendSurveyPdf failed', {
