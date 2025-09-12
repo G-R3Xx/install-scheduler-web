@@ -1,24 +1,31 @@
 // functions/index.js
 
-// ---- Firebase Functions v2 ----
+/* -----------------------------------------------------------
+ * Imports (Firebase Functions v2, Admin, SendGrid, PDF, Fetch)
+ * ----------------------------------------------------------*/
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
 
-// ---- Admin / SendGrid / PDF / Fetch ----
 const admin = require('firebase-admin');
 const sgMail = require('@sendgrid/mail');
 const PDFDocument = require('pdfkit');
-const fetch = require('node-fetch'); // v2
+const fetch = require('node-fetch'); // v2 only
 
-// Initialize Admin
+/* --------------------
+ * Admin initialization
+ * -------------------*/
 admin.initializeApp({ storageBucket: 'install-scheduler.appspot.com' });
 const db = admin.firestore();
 
-// Secrets
+/* --------------
+ * Secrets (v2+)
+ * -------------*/
 const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY');
 
-// Helpers
+/* -------------------------
+ * Small helpers / utilities
+ * ------------------------*/
 const lower = (s) => (s || '').toString().toLowerCase().trim();
 const esc = (s) =>
   String(s || '')
@@ -26,54 +33,48 @@ const esc = (s) =>
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 
-const bucket = admin.storage().bucket();
 const isHttp = (u) => /^https?:\/\//i.test(u || '');
-const isGs = (u) => /^gs:\/\//i.test(u || '');
+const isGs   = (u) => /^gs:\/\//i.test(u || '');
+const bucket = admin.storage().bucket();
 
-// Convert gs:// or storage path to a signed HTTPS URL (24h)
 async function toHttpUrl(pathOrUrl) {
   if (!pathOrUrl) return null;
   if (isHttp(pathOrUrl)) return pathOrUrl;
 
+  // Allow gs:// or bare storage paths
   let objectPath = pathOrUrl;
   if (isGs(objectPath)) objectPath = objectPath.replace(/^gs:\/\/[^/]+\//i, '');
   try {
     const [signed] = await bucket
       .file(objectPath)
-      .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 });
+      .getSignedUrl({ action: 'read', expires: Date.now() + 1000 * 60 * 60 * 24 }); // 24h
     return signed;
   } catch (err) {
-    console.warn('Could not sign URL', { objectPath, err: err?.message });
+    console.warn('Could not sign URL', { objectPath, error: err?.message });
     return null;
   }
 }
-async function normalizeMany(list) {
+
+async function normalizeManyToHttp(list) {
   const arr = Array.isArray(list) ? list : [];
   const resolved = await Promise.all(arr.map(toHttpUrl));
   return resolved.filter(Boolean);
 }
-async function normalizeOne(value) {
-  const url = await toHttpUrl(value);
-  return url || null;
+async function normalizeOneToHttp(value) {
+  const u = await toHttpUrl(value);
+  return u || null;
 }
 
-// Safe fetch -> Buffer (with timeout and ceiling)
-async function safeFetchBuf(url, { timeoutMs = 15000, maxBytes = 8 * 1024 * 1024 } = {}) {
+// Download a URL to Buffer (with timeout)
+async function fetchBuf(url, timeoutMs = 15000) {
   if (!url) return null;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(url, { signal: ctrl.signal });
     if (!r.ok) return null;
-
-    // If content-length is too big, skip
-    const len = Number(r.headers.get('content-length') || 0);
-    if (len && len > maxBytes) return null;
-
-    const data = await r.arrayBuffer();
-    if (data.byteLength > maxBytes) return null;
-
-    return Buffer.from(data);
+    const ab = await r.arrayBuffer();
+    return Buffer.from(ab);
   } catch {
     return null;
   } finally {
@@ -81,16 +82,16 @@ async function safeFetchBuf(url, { timeoutMs = 15000, maxBytes = 8 * 1024 * 1024
   }
 }
 
-// --------------------------------------------------------------------
-// Job completion email — HTML + separate attachments (photos + signature)
-// --------------------------------------------------------------------
+/* =====================================================================
+ * COMPLETED JOB EMAIL (HTML + attachments for completed photos/signature)
+ * =====================================================================*/
 async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   sgMail.setApiKey(keyVal);
 
-  const toAddress = toOverride || process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
-  const fromAddress = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
+  const toAddress   = toOverride || process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
+  const fromAddress =              process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-  // Build user map
+  // User map for names
   const usersSnap = await db.collection('users').get();
   const userMap = {};
   usersSnap.forEach((d) => {
@@ -98,6 +99,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     userMap[d.id] = u.shortName || u.displayName || u.email || d.id;
   });
 
+  // Fields
   const clientName  = job.clientName || job.company || 'Unknown Client';
   const address     = job.address || 'No address supplied';
   const description = job.description || '';
@@ -110,9 +112,7 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     if (d) installDateStr = d.toLocaleString();
   } catch {}
 
-  const assignedIds = Array.isArray(job.assignedTo)
-    ? job.assignedTo
-    : (job.assignedTo ? [job.assignedTo] : []);
+  const assignedIds   = Array.isArray(job.assignedTo) ? job.assignedTo : (job.assignedTo ? [job.assignedTo] : []);
   const assignedNames = assignedIds.map((id) => userMap[id] || id);
 
   // Hours table
@@ -141,60 +141,6 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
     breakdownRows = `<tr><td colspan="2" style="padding:6px 10px;border:1px solid #ddd;">No hours logged</td></tr>`;
   }
 
-  // ---------- Build attachments (completed photos + signature) ----------
-  const normalizedPhotos = await normalizeMany(job.completedPhotos);
-  const signatureUrl = await normalizeOne(job.signatureURL || job.signatureUrl);
-
-  const MAX_ATTACH = 12;                 // safety: max number of photos
-  const MAX_TOTAL = 22 * 1024 * 1024;    // ~22MB total across attachments
-  const PER_FILE_MAX = 6 * 1024 * 1024;  // ~6MB per file
-  let totalBytes = 0;
-  const attachments = [];
-
-  // Photos
-  for (let i = 0; i < normalizedPhotos.length && attachments.length < MAX_ATTACH; i++) {
-    const url = normalizedPhotos[i];
-    const buf = await safeFetchBuf(url, { maxBytes: PER_FILE_MAX });
-    if (!buf) continue;
-    const nextTotal = totalBytes + buf.length;
-    if (nextTotal > MAX_TOTAL) break;
-    totalBytes = nextTotal;
-
-    // naive mime from url ext (fallback image/jpeg)
-    const lowerUrl = url.toLowerCase();
-    const ext = lowerUrl.match(/\.(jpe?g|png|webp|gif|bmp|heic|tif?)/)?.[1] || 'jpg';
-    const mime =
-      ext.startsWith('png') ? 'image/png' :
-      ext.startsWith('webp') ? 'image/webp' :
-      ext.startsWith('gif') ? 'image/gif' :
-      ext.startsWith('bmp') ? 'image/bmp' :
-      ext.startsWith('heic') ? 'image/heic' :
-      ext.startsWith('tif') ? 'image/tiff' :
-      'image/jpeg';
-
-    const indexStr = String(i + 1).padStart(2, '0');
-    attachments.push({
-      content: buf.toString('base64'),
-      filename: `completed_${indexStr}.${ext === 'jpeg' ? 'jpg' : ext}`,
-      type: mime,
-      disposition: 'attachment',
-    });
-  }
-
-  // Signature
-  if (signatureUrl && attachments.length < MAX_ATTACH) {
-    const sigBuf = await safeFetchBuf(signatureUrl, { maxBytes: PER_FILE_MAX });
-    if (sigBuf && totalBytes + sigBuf.length <= MAX_TOTAL) {
-      attachments.push({
-        content: sigBuf.toString('base64'),
-        filename: 'signature.png',
-        type: 'image/png',
-        disposition: 'attachment',
-      });
-    }
-  }
-
-  // Email HTML
   const html = `
   <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;background:#fff;border:1px solid #eaeaea;border-radius:10px;overflow:hidden;">
     <div style="background:#d6d2d5;padding:20px;text-align:center;">
@@ -224,14 +170,46 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
         </tbody>
       </table>
 
-      ${
-        attachments.length
-          ? `<p style="margin-top:18px;color:#111"><strong>Photos & signature are attached</strong> (${attachments.length} file${attachments.length>1?'s':''}).</p>`
-          : `<p style="margin-top:18px;color:#6b7280"><em>No photos/signature attached.</em></p>`
-      }
+      <p style="color:#888;font-size:12px;margin-top:18px;">Job ID: ${esc(jobId)}</p>
+      <p style="color:#666;font-size:13px;margin-top:6px;">Completed photos and signature are attached to this email.</p>
     </div>
   </div>
   `;
+
+  // Build attachments (completed photos + signature)
+  const attachments = [];
+  // Normalize URLs first so gs:// / storage paths work
+  const photoUrls = await normalizeManyToHttp(job.completedPhotos);
+  const sigUrl    = await normalizeOneToHttp(job.signatureURL || job.signatureUrl);
+
+  // NOTE: SendGrid message limit is ~30MB. We fetch and attach, skipping failures.
+  // We’ll cap to 25 attachments total to stay on the safe side.
+  const MAX_ATTACH = 25;
+
+  let attachedCount = 0;
+  for (let i = 0; i < photoUrls.length && attachedCount < MAX_ATTACH; i++) {
+    const buf = await fetchBuf(photoUrls[i], 20000);
+    if (!buf) continue;
+    attachments.push({
+      content: buf.toString('base64'),
+      filename: `completed_photo_${i + 1}.jpg`,
+      type: 'image/jpeg',
+      disposition: 'attachment',
+    });
+    attachedCount++;
+  }
+
+  if (sigUrl && attachedCount < MAX_ATTACH) {
+    const buf = await fetchBuf(sigUrl, 15000);
+    if (buf) {
+      attachments.push({
+        content: buf.toString('base64'),
+        filename: 'signature.png',
+        type: 'image/png',
+        disposition: 'attachment',
+      });
+    }
+  }
 
   await sgMail.send({
     to: toAddress,
@@ -242,24 +220,23 @@ async function sendCompletionEmail({ jobId, job, toOverride, keyVal }) {
   });
 
   console.log('✅ Completion email sent', {
-    jobId,
-    toAddress,
-    attachments: attachments.length,
+    jobId, toAddress, attachments: attachments.length,
   });
 }
 
-// --------------------------------------------------------------------
-// Firestore trigger: send completion email
-// --------------------------------------------------------------------
+/* -----------------------------------------------------------
+ * Firestore trigger: send email when job transitions to done
+ * ----------------------------------------------------------*/
 exports.sendJobCompletedEmail = onDocumentWritten(
   { document: 'jobs/{jobId}', secrets: [SENDGRID_API_KEY] },
   async (event) => {
     const jobId = event.params.jobId;
+
     const before = event.data.before.exists ? (event.data.before.data() || {}) : null;
     const after  = event.data.after.exists  ? (event.data.after.data()  || {}) : null;
 
-    const beforeStatus = before ? lower(before.status) : null;
-    const afterStatus  = after  ? lower(after.status)  : null;
+    const beforeStatus = before ? lower(before.status) : '';
+    const afterStatus  = after  ? lower(after.status)  : '';
 
     const isNowCompleted = after && (afterStatus === 'complete' || afterStatus === 'completed');
     if (!isNowCompleted) return;
@@ -273,20 +250,22 @@ exports.sendJobCompletedEmail = onDocumentWritten(
         keyVal: SENDGRID_API_KEY.value(),
       });
     } catch (err) {
-      console.error('❌ sendJobCompletedEmail failed', err);
+      console.error('❌ sendJobCompletedEmail failed', {
+        jobId, error: err?.message, code: err?.code, body: err?.response?.body,
+      });
     }
   }
 );
 
-// --------------------------------------------------------------------
-// Manual test endpoint
-// --------------------------------------------------------------------
+/* -----------------------------------------
+ * Manual test endpoint (SendGrid baseline)
+ * ----------------------------------------*/
 exports.testSendgridMail = onRequest(
   { secrets: [SENDGRID_API_KEY] },
   async (_req, res) => {
     try {
       sgMail.setApiKey(SENDGRID_API_KEY.value());
-      const to = process.env.SENDGRID_TO || 'printroom@tenderedge.com.au';
+      const to   = process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
       const from = process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
       await sgMail.send({
         to,
@@ -301,28 +280,28 @@ exports.testSendgridMail = onRequest(
   }
 );
 
+/* =========================================================
+ * Survey PDF (polished) + email (CORS-safe from your app)
+ * ========================================================*/
 // --------------------------------------------------------------------
-// Survey PDF + Email (polished layout, pills/grid/page numbers)
+// Survey PDF + Email (polished, single-stream collector, CORS-safe)
 // --------------------------------------------------------------------
 exports.sendSurveyPdf = onRequest(
   { secrets: [SENDGRID_API_KEY], region: 'us-central1', timeoutSeconds: 120, memory: '512MiB' },
   async (req, res) => {
-    // ---- CORS ----
+    // ---- CORS (both local & prod) ----
     const origin = req.get('origin') || '';
     const ALLOWED_ORIGINS = [
       'https://install-scheduler.web.app',
       'http://localhost:3000',
       'http://127.0.0.1:3000',
     ];
-    const allowOrigin = ALLOWED_ORIGINS.includes(origin)
-      ? origin
-      : 'https://install-scheduler.web.app';
+    const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : 'https://install-scheduler.web.app';
     res.set('Access-Control-Allow-Origin', allowOrigin);
     res.set('Vary', 'Origin');
     res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.set('Access-Control-Max-Age', '3600');
-
     if (req.method === 'OPTIONS') return res.status(204).send('');
     if (req.method !== 'POST')  return res.status(405).send('Use POST');
 
@@ -330,7 +309,6 @@ exports.sendSurveyPdf = onRequest(
       const { surveyId, to: toOverride } = req.body || {};
       if (!surveyId) return res.status(400).send('Missing surveyId');
 
-      // Load survey doc
       const snap = await db.collection('jobs').doc(String(surveyId)).get();
       if (!snap.exists) return res.status(404).send('Survey not found');
 
@@ -339,155 +317,152 @@ exports.sendSurveyPdf = onRequest(
         return res.status(400).send('Document is not a survey');
       }
 
-      // Configure SendGrid
+      // SendGrid
       sgMail.setApiKey(SENDGRID_API_KEY.value());
       const to   = toOverride || process.env.SENDGRID_TO   || 'printroom@tenderedge.com.au';
       const from =              process.env.SENDGRID_FROM || 'printroom@tenderedge.com.au';
 
-      // ---------- PDF BUILD ----------
       const title = `Site Survey — ${survey.clientName || survey.client || survey.company || 'Untitled'}`;
       const fileName = `Survey_${(survey.clientName || survey.client || survey.company || surveyId)
         .toString()
         .replace(/\s+/g, '_')}.pdf`;
 
-      // Safe fetch for images
-      const safeFetch = async (url, ms = 15000, maxBytes = 8 * 1024 * 1024) =>
-        safeFetchBuf(url, { timeoutMs: ms, maxBytes });
+      // Normalize arrays
+      const signsArr = Array.isArray(survey.signs) ? survey.signs : [];
+      const refArr   = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
 
-      const signs = Array.isArray(survey.signs) ? survey.signs : [];
-      const refs  = Array.isArray(survey.referencePhotos) ? survey.referencePhotos : [];
+      // -------- helper to fetch image as Buffer (timeout) --------
+      async function fetchBuf(url, timeoutMs = 15000) {
+        if (!url) return null;
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const r = await fetch(url, { signal: ctrl.signal });
+          if (!r.ok) return null;
+          const ab = await r.arrayBuffer();
+          return Buffer.from(ab);
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(t);
+        }
+      }
 
-      const doc = new PDFDocument({
-        size: 'A4',
-        margin: 36,
-        info: { Title: title },
-        bufferPages: true,
-      });
-
-      const chunks = [];
-      doc.on('data', (b) => chunks.push(b));
-      doc.on('error', (e) => console.error('PDF error', e));
-
-      // Styles & helpers
+      // ---------------- Build PDF (no extra 'data' listeners) ----------------
       const ACCENT = '#0E2A47';
       const MUTED  = '#6b7280';
       const BORDER = '#e5e7eb';
       const TEXT   = '#111827';
       const SUBTLE = '#f3f4f6';
-      const pageWidth  = doc.page.width;
-      const pageHeight = doc.page.height;
+
+      const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: title } });
+
+      const pageWidth = doc.page.width;
       const L = doc.page.margins.left;
       const R = pageWidth - doc.page.margins.right;
       const usableWidth = R - L;
 
-      const pill = (label) => {
-        const paddingX = 10;
-        const paddingY = 4;
-        doc.font('Helvetica-Bold').fontSize(11);
+      const hr = (y = doc.y, color = BORDER) => {
+        doc.save().moveTo(L, y).lineTo(R, y).lineWidth(1).strokeColor(color).stroke().restore();
+      };
+      const drawFooter = () => {
+        const str = `Page ${doc.page.number}`;
+        doc.font('Helvetica').fontSize(9).fillColor(MUTED);
+        doc.text(str, L, doc.page.height - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
+      };
+      doc.on('pageAdded', drawFooter);
+
+      // Section pill
+      function sectionPill(text) {
+        const label = String(text || '').toUpperCase();
+        const padX = 10, padY = 4, radius = 10;
+        doc.font('Helvetica-Bold').fontSize(10);
         const w = doc.widthOfString(label);
         const h = doc.currentLineHeight();
-        const boxW = Math.ceil(w + paddingX * 2);
-        const boxH = Math.ceil(h + paddingY * 2);
-        const x = L;
-        const y = doc.y;
-
-        doc.save().roundedRect(x, y, boxW, boxH, 10).fill(SUBTLE).restore();
-        doc.save().roundedRect(x, y, boxW, boxH, 10).lineWidth(1).strokeColor(BORDER).stroke().restore();
-        doc.fillColor(TEXT).text(label, x + paddingX, y + paddingY);
-        doc.moveDown(0.8);
-      };
-
-      const sectionTitle = (text) => pill(text);
-
-      const kvRow = (label, value, colX, labelW = 82, valueW = 200) => {
-        const yStart = doc.y;
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(String(label), colX, yStart, { width: labelW });
-        doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(value || '—'), colX + labelW + 8, yStart, { width: valueW });
-      };
+        const pillW = w + padX * 2;
+        const pillH = h + padY * 2;
+        const x = L, y = doc.y;
+        doc.save()
+          .lineWidth(1)
+          .fillColor('#e8eef8')
+          .strokeColor('#c7d7f2')
+          .roundedRect(x, y, pillW, pillH, radius)
+          .fillAndStroke()
+          .restore();
+        doc.fillColor(ACCENT).text(label, x + padX, y + padY);
+        doc.moveDown(1.2);
+        doc.fillColor(TEXT);
+      }
 
       const ensureSpace = (needed) => {
-        const bottom = pageHeight - doc.page.margins.bottom;
+        const bottom = doc.page.height - doc.page.margins.bottom;
         if (doc.y + needed > bottom) doc.addPage();
       };
 
-      const footerAt = (pageIndex, total) => {
-        const saveIndex = doc.page.index;
-        doc.switchToPage(pageIndex);
-        const label = `Page ${pageIndex + 1} of ${total}`;
-        doc.font('Helvetica').fontSize(9).fillColor(MUTED);
-        doc.text(label, L, pageHeight - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
-        doc.switchToPage(saveIndex);
-      };
+      // Header bar + chip
+      doc.save();
+      doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
+      doc.restore();
+      doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 20, { width: usableWidth, align: 'left' });
+      doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 42);
 
-      // Header band + Survey ID chip
-      (function header() {
-        doc.save();
-        doc.rect(0, 0, pageWidth, 70).fill(ACCENT);
-        doc.restore();
+      const chipText = `SURVEY ID: ${String(surveyId)}`;
+      doc.font('Helvetica-Bold').fontSize(9);
+      const chipW = doc.widthOfString(chipText) + 18;
+      const chipX = R - chipW;
+      const chipY = 16;
+      doc.save()
+        .fillColor('#fef3c7')
+        .strokeColor('#f59e0b')
+        .roundedRect(chipX, chipY, chipW, 24, 12)
+        .fillAndStroke()
+        .restore();
+      doc.fillColor('#92400e').text(chipText, chipX + 9, chipY + 6);
+      doc.moveDown(2.4);
+      drawFooter(); // page 1
 
-        // Title / date
-        doc.fillColor('#fff').font('Helvetica-Bold').fontSize(16).text('SITE SURVEY', L, 18, { width: usableWidth - 160, align: 'left' });
-        doc.font('Helvetica').fontSize(10).text(new Date().toLocaleString(), L, 40);
-
-        // Survey ID chip (right)
-        const idText = `Survey ID: ${String(surveyId)}`;
-        doc.font('Helvetica-Bold').fontSize(9);
-        const tw = doc.widthOfString(idText);
-        const th = doc.currentLineHeight();
-        const padX = 8, padY = 4;
-        const chipW = tw + padX * 2;
-        const chipH = th + padY * 2;
-        const chipX = R - chipW;
-        const chipY = 20;
-
-        doc.save().roundedRect(chipX, chipY, chipW, chipH, 12).fill('#1f2937').restore();
-        doc.fillColor('#fff').text(idText, chipX + padX, chipY + padY);
-
-        // move content below header
-        doc.y = 70 + 12;
-        doc.fillColor(TEXT);
-      })();
-
-      // Client Details
-      sectionTitle('Client Details');
-
+      // Client details card
+      sectionPill('Client Details');
       const cardY = doc.y;
       const cardH = 92;
       doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).fill(SUBTLE).restore();
       doc.save().rect(L, cardY - 6, usableWidth, cardH + 12).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
+      const kv = (label, val, x, lw = 80, vw = 190) => {
+        const yStart = doc.y;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(TEXT).text(String(label || ''), x, yStart, { width: lw });
+        doc.font('Helvetica').fontSize(10).fillColor('#111').text(String(val || '—'), x + lw + 8, yStart, { width: vw });
+      };
       const col1X = L + 12;
       const col2X = L + Math.floor(usableWidth / 2) + 12;
 
       doc.y = cardY + 6;
-      kvRow('Client',  survey.clientName || survey.client, col1X);
-      kvRow('Company', survey.company, col1X);
-      kvRow('Contact', survey.contact, col1X);
+      kv('Client',  survey.clientName || survey.client, col1X);
+      kv('Company', survey.company, col1X);
+      kv('Contact', survey.contact, col1X);
 
       doc.y = cardY + 6;
-      kvRow('Phone',   survey.phone,   col2X);
-      kvRow('Email',   survey.email,   col2X);
-      kvRow('Address', survey.address, col2X, 82, Math.min(usableWidth / 2 - 60, 240));
+      kv('Phone',   survey.phone,   col2X);
+      kv('Email',   survey.email,   col2X);
+      kv('Address', survey.address, col2X, 80, Math.min(usableWidth / 2 - 60, 240));
       doc.moveDown(1.2);
 
-      // Survey Notes
+      // Notes
       if (survey.description) {
-        sectionTitle('Survey Notes');
+        sectionPill('Survey Notes');
         doc.font('Helvetica').fontSize(10).fillColor(TEXT).text(String(survey.description || ''), { width: usableWidth });
-        doc.moveDown(0.4);
       }
 
-      // Survey Signs
-      if (signs.length) {
-        sectionTitle('Survey Signs');
-
-        for (let i = 0; i < signs.length; i++) {
-          const s = signs[i] || {};
+      // Signs
+      if (signsArr.length) {
+        sectionPill('Survey Signs');
+        for (let i = 0; i < signsArr.length; i++) {
+          const s = signsArr[i] || {};
           const caption = s.name || `Sign ${i + 1}`;
           const desc = s.description || '';
           const imgUrl = s.annotatedImageUrl || s.originalImageUrl || '';
 
-          const blockH = 20 + (desc ? 36 : 0) + 260 + 16;
+          const blockH = 20 + (desc ? 36 : 0) + 260 + 14;
           ensureSpace(blockH);
 
           doc.font('Helvetica-Bold').fontSize(11).fillColor(TEXT).text(caption);
@@ -497,10 +472,9 @@ exports.sendSurveyPdf = onRequest(
           }
 
           if (imgUrl) {
-            const buf = await safeFetch(imgUrl);
+            const buf = await fetchBuf(imgUrl);
             const imgY = doc.y + 6;
             const imgH = 260;
-
             doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).fill(SUBTLE).restore();
             doc.save().rect(L, imgY - 4, usableWidth, imgH + 8).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
@@ -513,8 +487,7 @@ exports.sendSurveyPdf = onRequest(
             } else {
               doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('Image unavailable.', L + 12, imgY + 6);
             }
-
-            doc.moveDown(imgH / 14 + 0.3);
+            doc.moveDown(imgH / 14 + 0.4);
           } else {
             doc.font('Helvetica-Oblique').fontSize(10).fillColor(MUTED).text('No image provided.');
           }
@@ -522,33 +495,29 @@ exports.sendSurveyPdf = onRequest(
         }
       }
 
-      // Reference Photos – 3-column grid, tiny captions
-      if (refs.length) {
-        sectionTitle('Reference Photos');
-
-        const cols = 3;
-        const gap = 10;
-        const cellW = Math.floor((usableWidth - gap * (cols - 1)) / cols);
+      // Reference photos (3-col grid with tiny captions)
+      if (refArr.length) {
+        sectionPill('Reference Photos');
+        const cellW = Math.floor((usableWidth - 20) / 3);
         const cellH = 120;
+        const gap = 10;
 
         let col = 0;
-        let rowY = doc.y;
+        let x = L;
 
-        for (let i = 0; i < refs.length; i++) {
-          if (col === 0) {
-            ensureSpace(cellH + 22);
-            rowY = doc.y;
-          }
-          const x = L + col * (cellW + gap);
-          const y = rowY;
+        for (let i = 0; i < refArr.length; i++) {
+          const blockH = cellH + 20;
+          ensureSpace(blockH);
+
+          const y = doc.y;
 
           doc.save().rect(x, y, cellW, cellH).fill(SUBTLE).restore();
           doc.save().rect(x, y, cellW, cellH).lineWidth(1).strokeColor(BORDER).stroke().restore();
 
-          const buf = await safeFetch(refs[i]);
+          const buf = await fetchBuf(refArr[i]);
           if (buf) {
             try {
-              doc.image(buf, x + 4, y + 4, { fit: [cellW - 8, cellH - 8], align: 'center', valign: 'center' });
+              doc.image(buf, x + 4, y + 4, { fit: [cellW - 8, cellH - 22], align: 'center', valign: 'center' });
             } catch {
               doc.font('Helvetica-Oblique').fontSize(9).fillColor('#b91c1c').text('Photo error', x + 6, y + 6);
             }
@@ -557,36 +526,31 @@ exports.sendSurveyPdf = onRequest(
           }
 
           doc.font('Helvetica').fontSize(9).fillColor(MUTED)
-            .text(`Ref #${i + 1}`, x, y + cellH + 4, { width: cellW, align: 'center' });
+            .text(`#${i + 1}`, x + 6, y + cellH - 14, { width: cellW - 12, align: 'left' });
 
           col++;
-          if (col === cols) {
+          if (col === 3) {
             col = 0;
-            doc.y = y + cellH + 18;
+            x = L;
+            doc.moveDown(cellH / 14 + 0.9);
+          } else {
+            x += cellW + gap;
           }
         }
-        if (col !== 0) {
-          doc.y = rowY + cellH + 18;
-        }
       }
 
-      // Page numbers (buffered)
-      const range = doc.bufferedPageRange();
-      for (let i = 0; i < range.count; i++) {
-        const saveIndex = doc.page.index;
-        doc.switchToPage(range.start + i);
-        const label = `Page ${i + 1} of ${range.count}`;
-        doc.font('Helvetica').fontSize(9).fillColor('#6b7280');
-        doc.text(label, L, pageHeight - doc.page.margins.bottom + 10, { width: usableWidth, align: 'right' });
-        doc.switchToPage(saveIndex);
-      }
+      drawFooter();
 
-      const pdfBuf = await new Promise((resolve) => {
+      // ---- collect PDF in one place (single listener) ----
+      const pdfBuf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        doc.on('data', (b) => chunks.push(b));
         doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
         doc.end();
       });
 
-      // Email
+      // Email the PDF
       await sgMail.send({
         to,
         from,
@@ -611,8 +575,9 @@ exports.sendSurveyPdf = onRequest(
       console.log('✅ Survey PDF sent', { surveyId, to });
       return res.status(200).send('OK');
     } catch (err) {
+      // keep CORS headers in error path too
       console.error('❌ sendSurveyPdf failed', {
-        message: err?.message, code: err?.code, body: err?.response?.body
+        message: err?.message, code: err?.code, body: err?.response?.body,
       });
       const details =
         err?.response?.body?.errors?.map((e) => e.message).join('; ') ||
