@@ -22,6 +22,7 @@ import {
   Backdrop,
   CircularProgress,
 } from '@mui/material';
+import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
 import { DatePicker } from '@mui/x-date-pickers';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { useParams, useHistory } from 'react-router-dom';
@@ -44,7 +45,6 @@ import { db, storage } from '../firebase/firebase';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import SignatureCanvas from 'react-signature-canvas';
 import { useAuth } from '../contexts/AuthContext';
-// import OhsPromptOnLoad from '../components/OhsPromptOnLoad';
 import { jsPDF } from 'jspdf';
 import { convertSurveyToJob } from '../services/surveyService';
 
@@ -52,7 +52,7 @@ const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE ||
   'https://us-central1-install-scheduler.cloudfunctions.net';
 
-// ---------- helpers ----------
+/* ---------- helpers ---------- */
 const getUserNameFromAny = (u, userMap) => {
   const id = typeof u === 'string' ? u : (u && (u.id || u.uid)) || '';
   const rec = id ? userMap?.[id] : null;
@@ -64,6 +64,24 @@ const fmtDateAU = (val) => {
     val?.toDate?.() instanceof Date ? val.toDate() :
     (val instanceof Date ? val : null);
   return d ? d.toLocaleDateString('en-AU') : '';
+};
+
+const fmtTime = (strOrDate) => {
+  // supports either a Date (installDate with time set) or a "HH:MM" string stored separately
+  if (!strOrDate) return '';
+  if (strOrDate instanceof Date) {
+    return strOrDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+  }
+  // if it's "HH:MM", render as local time (no date)
+  try {
+    const [h, m] = String(strOrDate).split(':').map(Number);
+    if (Number.isFinite(h)) {
+      const d = new Date();
+      d.setHours(h || 0, m || 0, 0, 0);
+      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+    }
+  } catch {}
+  return '';
 };
 
 // Inline busy overlay
@@ -82,7 +100,10 @@ function BusyOverlay({ open, text = "Working…" }) {
 }
 
 export default function JobDetailPage() {
-  const { jobId } = useParams();
+  // Accept either :jobId or :id from the route
+  const { jobId: jobIdParam, id: idParam } = useParams();
+  const jobId = idParam || jobIdParam;
+
   const history = useHistory();
   const { currentUser, userMap } = useAuth();
 
@@ -108,7 +129,7 @@ export default function JobDetailPage() {
   const [allUsers, setAllUsers] = useState([]);
   const [assignSel, setAssignSel] = useState([]); // [{id,label}]
 
-  // Installer notes (INSIDE the component)
+  // Installer notes
   const [installerNotes, setInstallerNotes] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
 
@@ -116,8 +137,9 @@ export default function JobDetailPage() {
   const statusLc = String(job?.status || '').toLowerCase();
   const isComplete = ['complete', 'completed', 'done'].includes(statusLc);
 
-  // ---------- data fetch ----------
+  /* ---------- data fetch ---------- */
   const fetchJob = useCallback(async () => {
+    if (!jobId) return;
     const snap = await getDoc(doc(db, 'jobs', jobId));
     if (!snap.exists()) return;
     const data = snap.data() || {};
@@ -166,6 +188,7 @@ export default function JobDetailPage() {
   }, [jobId]);
 
   const fetchHours = useCallback(async () => {
+    if (!jobId) return;
     const entriesSnap = await getDocs(collection(db, 'jobs', jobId, 'timeEntries'));
     const entries = entriesSnap.docs.map((d) => d.data());
     setTimeEntries(entries);
@@ -194,7 +217,7 @@ export default function JobDetailPage() {
     fetchHours();
   }, [fetchJob, fetchHours]);
 
-  // ---------- actions ----------
+  /* ---------- actions ---------- */
   const handleAddHours = async () => {
     const parsed = parseFloat(hours);
     if (isNaN(parsed) || parsed <= 0) return;
@@ -244,10 +267,13 @@ export default function JobDetailPage() {
     setBusy(true);
     try {
       try {
-        const fileRef = ref(storage, url);
-        await deleteObject(fileRef);
+        const refPath = url.split('/o/')[1]?.split('?')[0];
+        if (refPath) {
+          const storageRef = ref(storage, decodeURIComponent(refPath));
+          await deleteObject(storageRef);
+        }
       } catch {
-        /* non-storage or no perms */
+        /* ignore storage delete errors */
       }
 
       const nextArr = (job?.[field] || []).filter((u) => u !== url);
@@ -475,7 +501,7 @@ export default function JobDetailPage() {
     }
   };
 
-  // >>> ADDED: Convert Survey -> Job <<<
+  // Convert Survey -> Job
   const doConvert = async () => {
     setBusy(true);
     try {
@@ -532,12 +558,18 @@ export default function JobDetailPage() {
     : [];
 
   const installDateStr = fmtDateAU(job.installDate);
+  const installTimeChip =
+    (job.installDate?.toDate?.() instanceof Date && fmtTime(job.installDate.toDate())) ||
+    (job.installDate instanceof Date && fmtTime(job.installDate)) ||
+    (job.installTime && fmtTime(job.installTime)) ||
+    '';
+
   const jobTotal = timeEntries.reduce((s, e) => s + (e.hours || 0), 0);
 
   return (
     <Box p={3}>
       {/* Only prompt OHS for real jobs, not surveys */}
-      {!isSurvey && ENABLE_OHS && /* OHS disabled */ null}
+      {!isSurvey && ENABLE_OHS && /* OHS disabled here */ null}
 
       <Card>
         <CardContent>
@@ -611,7 +643,18 @@ export default function JobDetailPage() {
 
             {!isSurvey && (
               <>
-                <Typography><strong>Install Date:</strong> {installDateStr}</Typography>
+                <Box sx={{ display:'flex', alignItems:'center', gap: 1 }}>
+                  <Typography><strong>Install Date:</strong> {installDateStr || '—'}</Typography>
+                  {installTimeChip && (
+                    <Chip
+                      size="small"
+                      icon={<AccessTimeRoundedIcon />}
+                      label={installTimeChip}
+                      variant="outlined"
+                    />
+                  )}
+                </Box>
+
                 <Typography sx={{ mt: 1 }}><strong>Assigned To:</strong></Typography>
                 <Box display="flex" gap={1} flexWrap="wrap" mt={1}>
                   {assignedIds.length

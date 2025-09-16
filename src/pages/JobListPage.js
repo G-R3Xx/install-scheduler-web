@@ -1,38 +1,34 @@
-// src/pages/JobListPage.js
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import {
-  Box,
-  Button,
-  Paper,
-  Tab,
-  Tabs,
-  Typography,
-  Switch,
-  FormControlLabel,
-  Chip,
+  Box, Button, Paper, Tab, Tabs, Typography,
+  Switch, FormControlLabel, Chip,
 } from '@mui/material';
 import { useHistory } from 'react-router-dom';
 import PhotoCameraRoundedIcon from '@mui/icons-material/PhotoCameraRounded';
 import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
-import {
-  collection,
-  getDocs,
-  query,
-  where,
-} from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../firebase/firebase';
 import { useAuth } from '../contexts/AuthContext';
 
 /* ---------- helpers ---------- */
-const fmtDate = (date) => {
-  if (!date) return '';
-  return date.toLocaleDateString(undefined, {
-    weekday: 'long',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  });
-};
+const fmtDate = (date) =>
+  !date
+    ? ''
+    : date.toLocaleDateString(undefined, {
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
+
+const fmtTime = (date) =>
+  !date
+    ? ''
+    : date.toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true, // AM/PM
+      });
 
 const toJSDate = (tsOrDate) =>
   tsOrDate?.toDate?.() instanceof Date
@@ -51,6 +47,9 @@ const isCompleted = (job) => {
   const s = String(job?.status || '').toLowerCase();
   return s === 'complete' || s === 'completed';
 };
+
+const isSurveyType = (job) => String(job?.jobType || '').toLowerCase() === 'survey';
+const isSurveyRequest = (job) => String(job?.jobType || '').toLowerCase() === 'survey-request';
 
 function IconWithBadge({ icon, count, badgeColor }) {
   const n = Number(count);
@@ -103,7 +102,6 @@ export default function JobListPage() {
   const [photoCountMap, setPhotoCountMap] = useState({});
   const [loading, setLoading] = useState(true);
 
-  /* ---------- data: jobs ---------- */
   const loadJobs = useCallback(async () => {
     setLoading(true);
     try {
@@ -111,44 +109,31 @@ export default function JobListPage() {
       const snap = await getDocs(col);
       const all = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
 
-      const onlyJobs = all.filter((j) => (j.jobType || 'job') !== 'survey');
-
       const photos = {};
       const hours = {};
-
-      for (const j of onlyJobs) {
+      for (const j of all) {
         photos[j.id] = Array.isArray(j.completedPhotos) ? j.completedPhotos.length : 0;
-
-        // fetch subcollection timeEntries for each job
         try {
           const sub = await getDocs(collection(db, 'jobs', j.id, 'timeEntries'));
           const total = sub.docs.reduce((sum, d) => sum + (d.data().hours || 0), 0);
           if (total > 0) hours[j.id] = Math.round(total * 10) / 10;
         } catch {
-          // ignore
+          /* ignore */
         }
       }
-
       setPhotoCountMap(photos);
       setHoursMap(hours);
-
-      // Do not pre-filter/sort here; we'll derive in memos below
-      setJobs(onlyJobs);
+      setJobs(all);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  /* ---------- data: surveys ---------- */
   const loadSurveys = useCallback(async () => {
     const col = collection(db, 'jobs');
     const snap = await getDocs(query(col, where('jobType', '==', 'survey')));
     const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
-    list.sort((a, b) => {
-      const ad = toJSDate(a.createdAt) || 0;
-      const bd = toJSDate(b.createdAt) || 0;
-      return bd - ad;
-    });
+    list.sort((a, b) => (toJSDate(b.createdAt) || 0) - (toJSDate(a.createdAt) || 0));
     setSurveys(list);
   }, []);
 
@@ -161,12 +146,8 @@ export default function JobListPage() {
   const activeJobs = useMemo(
     () =>
       jobs
-        .filter((j) => !isCompleted(j) && j.installDate) // keep existing behavior: active need an installDate to show
-        .sort((a, b) => {
-          const ad = toJSDate(a.installDate) || 0;
-          const bd = toJSDate(b.installDate) || 0;
-          return ad - bd; // oldest → newest
-        }),
+        .filter((j) => !isCompleted(j) && j.installDate) // includes jobs + survey-requests (+ surveys with dates)
+        .sort((a, b) => (toJSDate(a.installDate) || 0) - (toJSDate(b.installDate) || 0)),
     [jobs]
   );
 
@@ -183,12 +164,11 @@ export default function JobListPage() {
         toJSDate(b.installDate) ||
         toJSDate(b.createdAt) ||
         new Date(0);
-      return bKey - aKey; // NEWEST first
+      return bKey - aKey;
     });
     return list;
   }, [jobs]);
 
-  // Group only ACTIVE jobs by install date
   const activeGroups = useMemo(() => {
     const map = new Map();
     activeJobs.forEach((j) => {
@@ -214,19 +194,25 @@ export default function JobListPage() {
       .join(', ');
   };
 
-  const openJob = (id) => history.push(`/jobs/${id}`);
+  // Open capture for both 'survey-request' and 'survey'; otherwise Job Detail
+  const openItem = (j) => {
+    const type = String(j?.jobType || 'job').toLowerCase();
+    if (type === 'survey' || type === 'survey request') {
+      history.push(`/surveys/${j.id}`); // open existing survey
+    } else {
+      history.push(`/jobs/${j.id}`);
+    }
+  };
 
   /* ---------- UI ---------- */
   return (
     <Box sx={{ p: 2 }}>
-      {/* Add buttons */}
+      {/* Add button(s) */}
       <Box sx={{ display: 'flex', gap: 1, mb: 1 }}>
         <Button variant="contained" onClick={() => history.push('/jobs/new')}>
           ADD JOB
         </Button>
-        <Button variant="outlined" onClick={() => history.push('/surveys/new')}>
-          ADD SURVEY
-        </Button>
+        {/* "ADD SURVEY" removed */}
       </Box>
 
       {/* Tabs + completed toggle */}
@@ -255,7 +241,7 @@ export default function JobListPage() {
             <Typography>No jobs to show.</Typography>
           )}
 
-          {/* Active (scheduled) groups */}
+          {/* Active groups */}
           {activeGroups.map((g) => (
             <Box key={g.key} sx={{ mt: 2 }}>
               <Typography variant="h6" sx={{ mb: 1 }}>
@@ -267,11 +253,13 @@ export default function JobListPage() {
                 const logo = j.companyLogoUrl || '';
                 const photos = photoCountMap[j.id] || 0;
                 const hours = hoursMap[j.id] || 0;
+                const jsDate = toJSDate(j.installDate);
+                const showTime = !!j.installTime;
 
                 return (
                   <Paper
                     key={j.id}
-                    onClick={() => openJob(j.id)}
+                    onClick={() => openItem(j)}
                     sx={{
                       p: 1.5,
                       mb: 1,
@@ -318,8 +306,27 @@ export default function JobListPage() {
                       </Typography>
                     </Box>
 
-                    {/* Icons */}
-                    <Box sx={{ display: 'flex', gap: 1 }}>
+                    {/* Time + Icons + badges */}
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      {showTime && jsDate && (
+                        <Chip
+                          icon={<AccessTimeRoundedIcon />}
+                          label={fmtTime(jsDate)}
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            color: '#fff',
+                            borderColor: 'rgba(255,255,255,0.3)',
+                            '& .MuiChip-icon': { color: '#fff' },
+                          }}
+                        />
+                      )}
+                      {isSurveyRequest(j) && (
+                        <Chip label="SURVEY REQUEST" size="small" color="warning" sx={{ fontWeight: 700 }} />
+                      )}
+                      {isSurveyType(j) && (
+                        <Chip label="SURVEY" size="small" color="info" sx={{ fontWeight: 700 }} />
+                      )}
                       <IconWithBadge
                         icon={<PhotoCameraRoundedIcon fontSize="small" />}
                         count={photos}
@@ -337,7 +344,7 @@ export default function JobListPage() {
             </Box>
           ))}
 
-          {/* Completed section (only when toggled on) */}
+          {/* Completed section */}
           {showCompleted && (
             <Box sx={{ mt: 3 }}>
               <Typography variant="h6" sx={{ mb: 1 }}>
@@ -353,16 +360,16 @@ export default function JobListPage() {
                 const logo = j.companyLogoUrl || '';
                 const photos = photoCountMap[j.id] || 0;
                 const hours = hoursMap[j.id] || 0;
-
                 const completedOn =
                   toJSDate(j.completedAt) ||
                   toJSDate(j.installDate) ||
                   toJSDate(j.createdAt);
+                const showTime = !!j.installTime;
 
                 return (
                   <Paper
                     key={j.id}
-                    onClick={() => openJob(j.id)}
+                    onClick={() => openItem(j)}
                     sx={{
                       p: 1.5,
                       mb: 1,
@@ -409,8 +416,27 @@ export default function JobListPage() {
                       </Typography>
                     </Box>
 
-                    {/* Icons */}
-                    <Box sx={{ display: 'flex', gap: 1 }}>
+                    {/* Time + Icons + badges */}
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                      {showTime && toJSDate(j.installDate) && (
+                        <Chip
+                          icon={<AccessTimeRoundedIcon />}
+                          label={fmtTime(toJSDate(j.installDate))}
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            color: '#fff',
+                            borderColor: 'rgba(255,255,255,0.3)',
+                            '& .MuiChip-icon': { color: '#fff' },
+                          }}
+                        />
+                      )}
+                      {isSurveyRequest(j) && (
+                        <Chip label="SURVEY REQUEST" size="small" color="warning" sx={{ fontWeight: 700 }} />
+                      )}
+                      {isSurveyType(j) && (
+                        <Chip label="SURVEY" size="small" color="info" sx={{ fontWeight: 700 }} />
+                      )}
                       <IconWithBadge
                         icon={<PhotoCameraRoundedIcon fontSize="small" />}
                         count={photos}
@@ -435,7 +461,7 @@ export default function JobListPage() {
           {surveys.map((s) => (
             <Paper
               key={s.id}
-              onClick={() => history.push(`/jobs/${s.id}`)}
+               onClick={() => history.push(`/surveys/${s.id}`)}
               sx={{
                 p: 1.5,
                 mb: 1,

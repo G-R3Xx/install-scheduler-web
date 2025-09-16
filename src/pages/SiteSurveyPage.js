@@ -1,5 +1,5 @@
 // src/pages/SiteSurveyPage.js
-import React, { useState, lazy, Suspense, useRef } from 'react';
+import React, { useState, lazy, Suspense, useRef, useEffect } from 'react';
 import {
   Box, Button, Divider, TextField, Typography, CircularProgress,
   Grid, IconButton, Tooltip, Paper, Backdrop,
@@ -10,7 +10,9 @@ import { v4 as uuid } from 'uuid';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { createSurvey } from '../services/surveyService';
-import { useHistory } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
+import { db } from '../firebase/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
 const SurveyAnnotator = lazy(() => import('../components/SurveyAnnotator'));
 
@@ -75,6 +77,9 @@ export default function SiteSurveyPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const history = useHistory();
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const jobId = params.get('jobId') || null;
 
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -170,6 +175,33 @@ export default function SiteSurveyPage() {
     setSigns(next);
   };
 
+  // ---------- PREFILL FROM JOB (survey-request) ----------
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!jobId) return;
+      try {
+        const snap = await getDoc(doc(db, 'jobs', jobId));
+        if (!snap.exists()) return;
+        const d = snap.data() || {};
+        if (!alive) return;
+
+        setClient({
+          name: d.clientName || d.client || '',
+          company: d.company || '',
+          contact: d.contact || '',
+          phone: d.phone || '',
+          email: d.email || '',
+          address: d.address || '',
+          description: d.description || d.surveyDescription || '',
+        });
+      } catch (e) {
+        console.warn('prefill failed', e);
+      }
+    })();
+    return () => { alive = false; };
+  }, [jobId]);
+
   const onSaveSurvey = async () => {
     const anySignImage = signs.some(s => s.fileOriginal);
     if (!anySignImage && refPhotos.length === 0) {
@@ -180,7 +212,7 @@ export default function SiteSurveyPage() {
     setSaving(true);
     setBusy(true);
     try {
-      // 1) Collect annotation snapshots for each sign that has a preview (if user didn't click "Save Annotation")
+      // 1) Collect annotation snapshots for each sign (even if user didn’t hit “Save”)
       const signsWithSnaps = await Promise.all(signs.map(async (s) => {
         const ref = annotRefs.current[s.id];
         if (ref && ref.exportSnapshot && s.previewUrl) {
@@ -188,20 +220,21 @@ export default function SiteSurveyPage() {
             const snap = await ref.exportSnapshot();
             return { ...s, stageJSON: snap.stageJSON, annotatedBlob: snap.annotatedBlob };
           } catch {
-            return s; // keep as-is if export fails
+            return s;
           }
         }
         return s;
       }));
 
-      // 2) Save survey (uploads originals, annotated images, and reference photos)
+      // 2) Save survey -> this MUST update jobs/{jobId} (if provided)
       const surveyId = await createSurvey({
         client,
         signs: signsWithSnaps,
         referencePhotoFiles: refPhotos.map(p => p.file),
+        jobId, // <— important: tells the service to write into the job document
       });
 
-      // 3) Fire the send-email function (ignore error but log it)
+      // 3) Trigger email (best-effort)
       try {
         const resp = await fetch(`${FUNCTIONS_BASE}/sendSurveyPdf`, {
           method: 'POST',
@@ -221,7 +254,7 @@ export default function SiteSurveyPage() {
       signs.forEach(s => { if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl); });
       refPhotos.forEach(p => { if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url); });
 
-      // 5) Redirect to job list
+      // 5) Back to list
       history.push('/');
     } catch (e) {
       console.error(e);
@@ -450,6 +483,14 @@ export default function SiteSurveyPage() {
             disabled={saving || busy}
           >
             {saving ? 'Saving…' : 'Save Survey'}
+          </Button>
+          <Button
+            fullWidth={isMobile}
+            variant="outlined"
+            onClick={() => history.push('/')}
+            disabled={busy}
+          >
+            Cancel
           </Button>
         </Box>
       </Box>

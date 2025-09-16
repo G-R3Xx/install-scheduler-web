@@ -66,6 +66,7 @@ function AppRoutes() {
       </Route>
 
 <Route path="/surveys/new" component={SiteSurveyPage} />
+<Route exact path="/surveys/:jobId" component={SiteSurveyPage} />
       {/* Fallback */}
       <Redirect to="/" />
     </Switch>
