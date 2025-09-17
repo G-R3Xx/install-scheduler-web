@@ -1,60 +1,87 @@
 // src/services/surveyService.js
-import { db, storage } from '../firebase/firebase';
 import {
+  addDoc,
+  arrayUnion,
+  collection,
   doc,
-  setDoc,
-  updateDoc,
   serverTimestamp,
+  Timestamp,
+  updateDoc,
+  getDoc,
+  setDoc,
 } from 'firebase/firestore';
+import { db, storage } from '../firebase/firebase';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { v4 as uuid } from 'uuid';
 
 /**
- * Upload a blob/file to Firebase Storage and return its download URL.
+ * Upload a Blob/File to Firebase Storage and return its download URL.
  */
-async function uploadToStorage(path, fileOrBlob) {
+async function uploadToStorage(path, blobOrFile) {
   const r = ref(storage, path);
-  await uploadBytes(r, fileOrBlob);
+  await uploadBytes(r, blobOrFile);
   return await getDownloadURL(r);
 }
 
 /**
- * Create or finalize a survey.
- * - If jobId is provided (survey-request flow), we UPDATE that job doc in /jobs
- *   with full survey data and flip jobType to 'survey'.
- * - If no jobId is provided, we CREATE a new doc in /jobs with jobType 'survey'.
+ * createSurvey
+ * Saves a survey record (surveys collection) and, if jobId is supplied,
+ * writes the captured survey fields into jobs/{jobId} and flips jobType -> 'survey'.
  *
- * @param {Object} options
- * @param {Object} options.client
- * @param {Array}  options.signs  [{id,name,description,fileOriginal,annotatedBlob,stageJSON}]
- * @param {Array<File>} options.referencePhotoFiles
- * @param {string=} options.jobId  existing job to turn into a survey
- * @returns {string} surveyId (the job doc id in /jobs)
+ * @param {{
+ *  client: { name:string, company?:string, contact?:string, phone?:string, email?:string, address?:string, description?:string },
+ *  signs: Array<{ id:string, name?:string, description?:string, fileOriginal?:File|null, previewBlob?:Blob|null, annotatedBlob?:Blob|null, stageJSON?:any }>,
+ *  referencePhotoFiles: File[],
+ *  jobId?: string|null
+ * }} payload
+ * @returns {Promise<string>} surveyId
  */
-export async function createSurvey({ client, signs, referencePhotoFiles = [], jobId }) {
-  const surveyId = jobId || uuid(); // keep the same id if we’re finalizing a survey-request
+export async function createSurvey(payload) {
+  const {
+    client,
+    signs = [],
+    referencePhotoFiles = [],
+    jobId = null,
+  } = payload || {};
 
-  // 1) Upload sign images (original + annotated)
+  // 1) Create surveys/{surveyId} first (so we have an id to group uploads)
+  const surveyDocRef = await addDoc(collection(db, 'surveys'), {
+    createdAt: serverTimestamp(),
+    client: client || {},
+    linkedJobId: jobId || null,
+    signs: [],
+    referencePhotos: [],
+  });
+  const surveyId = surveyDocRef.id;
+
+  // 2) Upload all assets
   const uploadedSigns = [];
   for (const s of signs) {
+    // If no image was provided for this sign, keep metadata only
     let originalUrl = null;
     let annotatedUrl = null;
 
     if (s.fileOriginal) {
       originalUrl = await uploadToStorage(
-        `surveys/${surveyId}/signs/${s.id || uuid()}_original.jpg`,
+        `surveys/${surveyId}/signs/${s.id || Date.now()}_orig.jpg`,
         s.fileOriginal
       );
+    } else if (s.previewBlob) {
+      // Fallback: previewBlob can be used as "original" if no fileOriginal present
+      originalUrl = await uploadToStorage(
+        `surveys/${surveyId}/signs/${s.id || Date.now()}_orig.jpg`,
+        s.previewBlob
+      );
     }
+
     if (s.annotatedBlob) {
       annotatedUrl = await uploadToStorage(
-        `surveys/${surveyId}/signs/${s.id || uuid()}_annotated.jpg`,
+        `surveys/${surveyId}/signs/${s.id || Date.now()}_annot.jpg`,
         s.annotatedBlob
       );
     }
 
     uploadedSigns.push({
-      id: s.id || uuid(),
+      id: s.id || null,
       name: s.name || '',
       description: s.description || '',
       originalImageUrl: originalUrl,
@@ -63,63 +90,75 @@ export async function createSurvey({ client, signs, referencePhotoFiles = [], jo
     });
   }
 
-  // 2) Upload reference photos
-  const refPhotoUrls = [];
+  const uploadedRefs = [];
   for (const f of referencePhotoFiles) {
-    const url = await uploadToStorage(`surveys/${surveyId}/reference/${Date.now()}_${f.name}`, f);
-    refPhotoUrls.push(url);
+    const url = await uploadToStorage(
+      `surveys/${surveyId}/reference/${Date.now()}_${f.name || 'ref.jpg'}`,
+      f
+    );
+    uploadedRefs.push(url);
   }
 
-  // 3) Build survey payload
-  const payload = {
-    jobType: 'survey',
-    status: 'in progress',
-    updatedAt: serverTimestamp(),
-    createdAt: serverTimestamp(), // set on first write; harmless on update
-    // client details
-    clientName: client?.name || '',
-    company: client?.company || '',
-    contact: client?.contact || '',
-    phone: client?.phone || '',
-    email: client?.email || '',
-    address: client?.address || '',
-    description: client?.description || '',
-    // survey data
+  // 3) Persist assets on surveys/{surveyId}
+  await updateDoc(surveyDocRef, {
     signs: uploadedSigns,
-    referencePhotos: refPhotoUrls,
-  };
+    referencePhotos: uploadedRefs,
+    updatedAt: serverTimestamp(),
+  });
 
-  // 4) Write to /jobs/{surveyId}
-  const docRef = doc(db, 'jobs', surveyId);
-  await setDoc(docRef, payload, { merge: true }); // merge to preserve any existing bare fields
+  // 4) If this survey came from a "survey-request" job, mirror the important bits into the job
+  if (jobId) {
+    const jobRef = doc(db, 'jobs', jobId);
+    // Ensure job exists
+    const jobSnap = await getDoc(jobRef);
+    if (!jobSnap.exists()) {
+      // If somehow not present, create a minimal record
+      await setDoc(jobRef, { createdAt: serverTimestamp() }, { merge: true });
+    }
+
+    await updateDoc(jobRef, {
+      jobType: 'survey',                // <-- this moves it to the Surveys tab / list
+      description: client?.description || jobSnap.data()?.description || '',
+      signs: uploadedSigns,
+      referencePhotos: uploadedRefs,
+      updatedAt: serverTimestamp(),
+      lastSurveyId: surveyId,
+    });
+  }
 
   return surveyId;
 }
 
 /**
- * Convert an existing survey (in /jobs with jobType: 'survey') into a scheduled job.
- * @param {string} surveyId
- * @param {Object} options
- * @param {Date|null=} options.installDate  (JS Date or null)
- * @param {string[]=} options.assignedTo    array of user IDs
- * @param {boolean=} options.keepExistingDescription
+ * convertSurveyToJob
+ * Takes a jobs/{jobId} document that currently represents a survey and converts it into a real job.
+ * Optionally sets installDate and assignedTo.
+ *
+ * @param {string} jobId
+ * @param {{ installDate?: Date|null, assignedTo?: string[] , keepExistingDescription?: boolean }} options
  */
-export async function convertSurveyToJob(
-  surveyId,
-  { installDate = null, assignedTo = [], keepExistingDescription = true } = {}
-) {
-  const docRef = doc(db, 'jobs', surveyId);
+export async function convertSurveyToJob(jobId, options = {}) {
+  const { installDate = null, assignedTo = [], keepExistingDescription = true } = options;
 
-  // We only flip type + scheduling/assignment; leave survey fields intact
-  const update = {
+  const updates = {
     jobType: 'job',
+    status: 'in progress',
     updatedAt: serverTimestamp(),
-    assignedTo: Array.isArray(assignedTo) ? assignedTo : [],
-    installDate: installDate || null,
   };
 
-  // If you wanted to clear survey-only fields on convert, you could do it here.
-  // For now we keep description/signs/referencePhotos for history.
+  if (installDate instanceof Date) {
+    // store as Firestore Timestamp; UI already treats this as local date/time
+    updates.installDate = Timestamp.fromDate(installDate);
+  }
 
-  await updateDoc(docRef, update);
+  if (Array.isArray(assignedTo) && assignedTo.length) {
+    updates.assignedTo = assignedTo;
+  }
+
+  // keepExistingDescription: no-op here; if false you could blank it
+  if (!keepExistingDescription) {
+    updates.description = '';
+  }
+
+  await updateDoc(doc(db, 'jobs', jobId), updates);
 }

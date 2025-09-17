@@ -1,3 +1,4 @@
+// src/pages/CreateJobPage.js
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Box, Button, Divider, Paper, TextField, Typography, Stack
@@ -64,16 +65,25 @@ export default function CreateJobPage() {
     }
   };
 
+  /**
+   * Build Firestore Timestamp from installDate + installTime (in local time).
+   */
   const buildInstallTimestamp = () => {
     if (!form.installDate) return null;
-    // clone date-only (local) and optionally apply time
-    const base = new Date(form.installDate);
+
+    // Clone date (local midnight)
+    const base = new Date(
+      form.installDate.getFullYear(),
+      form.installDate.getMonth(),
+      form.installDate.getDate()
+    );
+
+    // Apply time if present
     if (form.installTime) {
       const [h, m] = form.installTime.split(':').map(Number);
       base.setHours(h || 0, m || 0, 0, 0);
-    } else {
-      base.setHours(0, 0, 0, 0);
     }
+
     return Timestamp.fromDate(base);
   };
 
@@ -102,7 +112,7 @@ export default function CreateJobPage() {
         const params = new URLSearchParams({ jobId: docRef.id });
         history.push(`/surveys/new?${params.toString()}`);
       } else {
-        history.push(`/jobs/${docRef.id}`);
+        history.push('/'); // ✅ back to job list immediately
       }
     } catch (e) {
       setError(e.message || 'Failed to create job.');

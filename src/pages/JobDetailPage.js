@@ -22,7 +22,6 @@ import {
   Backdrop,
   CircularProgress,
 } from '@mui/material';
-import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
 import { DatePicker } from '@mui/x-date-pickers';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { useParams, useHistory } from 'react-router-dom';
@@ -52,7 +51,7 @@ const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE ||
   'https://us-central1-install-scheduler.cloudfunctions.net';
 
-/* ---------- helpers ---------- */
+// ---------- helpers ----------
 const getUserNameFromAny = (u, userMap) => {
   const id = typeof u === 'string' ? u : (u && (u.id || u.uid)) || '';
   const rec = id ? userMap?.[id] : null;
@@ -64,24 +63,6 @@ const fmtDateAU = (val) => {
     val?.toDate?.() instanceof Date ? val.toDate() :
     (val instanceof Date ? val : null);
   return d ? d.toLocaleDateString('en-AU') : '';
-};
-
-const fmtTime = (strOrDate) => {
-  // supports either a Date (installDate with time set) or a "HH:MM" string stored separately
-  if (!strOrDate) return '';
-  if (strOrDate instanceof Date) {
-    return strOrDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
-  }
-  // if it's "HH:MM", render as local time (no date)
-  try {
-    const [h, m] = String(strOrDate).split(':').map(Number);
-    if (Number.isFinite(h)) {
-      const d = new Date();
-      d.setHours(h || 0, m || 0, 0, 0);
-      return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
-    }
-  } catch {}
-  return '';
 };
 
 // Inline busy overlay
@@ -100,10 +81,7 @@ function BusyOverlay({ open, text = "Working…" }) {
 }
 
 export default function JobDetailPage() {
-  // Accept either :jobId or :id from the route
-  const { jobId: jobIdParam, id: idParam } = useParams();
-  const jobId = idParam || jobIdParam;
-
+  const { jobId } = useParams();
   const history = useHistory();
   const { currentUser, userMap } = useAuth();
 
@@ -133,13 +111,12 @@ export default function JobDetailPage() {
   const [installerNotes, setInstallerNotes] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
 
-  const isSurvey = job?.jobType === 'survey';
+  const isSurvey = String(job?.jobType || '').toLowerCase() === 'survey';
   const statusLc = String(job?.status || '').toLowerCase();
   const isComplete = ['complete', 'completed', 'done'].includes(statusLc);
 
-  /* ---------- data fetch ---------- */
+  // ---------- data fetch ----------
   const fetchJob = useCallback(async () => {
-    if (!jobId) return;
     const snap = await getDoc(doc(db, 'jobs', jobId));
     if (!snap.exists()) return;
     const data = snap.data() || {};
@@ -178,6 +155,7 @@ export default function JobDetailPage() {
       ...data,
       referencePhotos: Array.isArray(data.referencePhotos) ? data.referencePhotos : [],
       completedPhotos: Array.isArray(data.completedPhotos) ? data.completedPhotos : [],
+      signs: Array.isArray(data.signs) ? data.signs : [],
       plans,
       plansRich,
     };
@@ -188,7 +166,6 @@ export default function JobDetailPage() {
   }, [jobId]);
 
   const fetchHours = useCallback(async () => {
-    if (!jobId) return;
     const entriesSnap = await getDocs(collection(db, 'jobs', jobId, 'timeEntries'));
     const entries = entriesSnap.docs.map((d) => d.data());
     setTimeEntries(entries);
@@ -217,13 +194,13 @@ export default function JobDetailPage() {
     fetchHours();
   }, [fetchJob, fetchHours]);
 
-  /* ---------- actions ---------- */
+  // ---------- actions ----------
   const handleAddHours = async () => {
     const parsed = parseFloat(hours);
     if (isNaN(parsed) || parsed <= 0) return;
 
     await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
-      userId: currentUser.uid,
+      userId: currentUser?.uid || 'unknown',
       hours: parsed,
       timestamp: new Date(),
     });
@@ -240,20 +217,15 @@ export default function JobDetailPage() {
     try {
       const newUrls = [];
       for (const file of files) {
-        const fileRef = ref(storage, `jobs/${jobId}/photos/${file.name}`);
+        const fileRef = ref(storage, `jobs/${jobId}/photos/${Date.now()}_${file.name}`);
         await uploadBytes(fileRef, file);
         const url = await getDownloadURL(fileRef);
         newUrls.push(url);
       }
 
-      setJob((prev) => ({
-        ...prev,
-        completedPhotos: [...(prev.completedPhotos || []), ...newUrls],
-      }));
-
-      await updateDoc(doc(db, 'jobs', jobId), {
-        completedPhotos: [...(job?.completedPhotos || []), ...newUrls],
-      });
+      const updated = [...(job?.completedPhotos || []), ...newUrls];
+      await updateDoc(doc(db, 'jobs', jobId), { completedPhotos: updated });
+      setJob((prev) => ({ ...prev, completedPhotos: updated }));
 
       e.target.value = '';
     } finally {
@@ -273,7 +245,7 @@ export default function JobDetailPage() {
           await deleteObject(storageRef);
         }
       } catch {
-        /* ignore storage delete errors */
+        /* non-storage or no perms; ignore */
       }
 
       const nextArr = (job?.[field] || []).filter((u) => u !== url);
@@ -317,8 +289,8 @@ export default function JobDetailPage() {
     await updateDoc(doc(db, 'jobs', jobId), {
       ohsCompleted: true,
       ohsCompletedAt: serverTimestamp(),
-      ohsLastBy: currentUser.uid,
-      ohsLastByEmail: currentUser.email || null,
+      ohsLastBy: currentUser?.uid || null,
+      ohsLastByEmail: currentUser?.email || null,
     });
     await fetchJob();
   };
@@ -501,7 +473,7 @@ export default function JobDetailPage() {
     }
   };
 
-  // Convert Survey -> Job
+  // >>> Convert Survey -> Job <<<
   const doConvert = async () => {
     setBusy(true);
     try {
@@ -558,18 +530,12 @@ export default function JobDetailPage() {
     : [];
 
   const installDateStr = fmtDateAU(job.installDate);
-  const installTimeChip =
-    (job.installDate?.toDate?.() instanceof Date && fmtTime(job.installDate.toDate())) ||
-    (job.installDate instanceof Date && fmtTime(job.installDate)) ||
-    (job.installTime && fmtTime(job.installTime)) ||
-    '';
-
   const jobTotal = timeEntries.reduce((s, e) => s + (e.hours || 0), 0);
 
   return (
     <Box p={3}>
       {/* Only prompt OHS for real jobs, not surveys */}
-      {!isSurvey && ENABLE_OHS && /* OHS disabled here */ null}
+      {!isSurvey && ENABLE_OHS && /* OHS disabled */ null}
 
       <Card>
         <CardContent>
@@ -590,7 +556,7 @@ export default function JobDetailPage() {
               }}
             >
               <Typography variant="subtitle1" sx={{ mb: 1 }}>
-                This is a <strong>Survey</strong>. It isn’t scheduled or trackable until converted to a job.
+                This is a <strong>Survey</strong>. Convert to a job to schedule and track.
               </Typography>
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                 <Button variant="contained" onClick={() => setConvertOpen(true)}>
@@ -628,33 +594,11 @@ export default function JobDetailPage() {
               <Typography><strong>Description:</strong> —</Typography>
             )}
 
-            {Array.isArray(job.surveyNotes) && job.surveyNotes.length > 0 && (
-              <Box sx={{ mt: 1 }}>
-                <Typography sx={{ mb: 0.5 }}><strong>Survey notes:</strong></Typography>
-                <ul style={{ marginTop: 0 }}>
-                  {job.surveyNotes.map((n, i) => (
-                    <li key={i} style={{ lineHeight: 1.5 }}>{n}</li>
-                  ))}
-                </ul>
-              </Box>
-            )}
-
-            <Typography><strong>Status:</strong> {job.status}</Typography>
+            <Typography sx={{ mt: 0.5 }}><strong>Status:</strong> {job.status}</Typography>
 
             {!isSurvey && (
               <>
-                <Box sx={{ display:'flex', alignItems:'center', gap: 1 }}>
-                  <Typography><strong>Install Date:</strong> {installDateStr || '—'}</Typography>
-                  {installTimeChip && (
-                    <Chip
-                      size="small"
-                      icon={<AccessTimeRoundedIcon />}
-                      label={installTimeChip}
-                      variant="outlined"
-                    />
-                  )}
-                </Box>
-
+                <Typography sx={{ mt: 0.5 }}><strong>Install Date:</strong> {installDateStr}</Typography>
                 <Typography sx={{ mt: 1 }}><strong>Assigned To:</strong></Typography>
                 <Box display="flex" gap={1} flexWrap="wrap" mt={1}>
                   {assignedIds.length
