@@ -1,5 +1,5 @@
 // src/pages/SiteSurveyPage.js
-import React, { useState, lazy, Suspense, useRef } from 'react';
+import React, { useState, lazy, Suspense, useRef, useEffect } from 'react';
 import {
   Box, Button, Divider, TextField, Typography, CircularProgress,
   Grid, IconButton, Tooltip, Paper, Backdrop,
@@ -10,27 +10,16 @@ import { v4 as uuid } from 'uuid';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { createSurvey } from '../services/surveyService';
-import { useHistory } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
+import { db } from '../firebase/firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import UploadOverlay from '../components/UploadOverlay';
 
 const SurveyAnnotator = lazy(() => import('../components/SurveyAnnotator'));
 
 const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE ||
   'https://us-central1-install-scheduler.cloudfunctions.net';
-
-function BusyOverlay({ open, text = "Saving survey… uploading photos" }) {
-  return (
-    <Backdrop open={open} sx={{ zIndex: 2000, color: '#fff' }}>
-      <Box sx={{ display: 'grid', justifyItems: 'center', gap: 1.5 }}>
-        <CircularProgress />
-        <Typography sx={{ fontWeight: 600 }}>{text}</Typography>
-        <Typography variant="body2" sx={{ opacity: 0.9 }}>
-          Please don’t close this window.
-        </Typography>
-      </Box>
-    </Backdrop>
-  );
-}
 
 async function makePreviewImage(file, { maxDim = 2048, quality = 0.8 } = {}) {
   const dataURL = await new Promise((resolve, reject) => {
@@ -75,6 +64,9 @@ export default function SiteSurveyPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const history = useHistory();
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  const jobId = params.get('jobId') || null;
 
   const [busy, setBusy] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -94,11 +86,9 @@ export default function SiteSurveyPage() {
     annotatedBlob: null,
   }]);
 
-  // annotator refs by signId
-  const annotRefs = useRef({}); // { [signId]: annotatorRef }
+  const [refPhotos, setRefPhotos] = useState([]);
+  const annotRefs = useRef({});
 
-  // reference photos (no annotations)
-  const [refPhotos, setRefPhotos] = useState([]); // [{ id, file, url }]
   const addRefPhotos = (files) => {
     const incoming = Array.from(files || []).map((f) => ({
       id: uuid(),
@@ -143,20 +133,20 @@ export default function SiteSurveyPage() {
       return;
     }
 
-    next[idx].fileOriginal = file;
     try {
       const preview = await makePreviewImage(file, {
         maxDim: isMobile ? 1600 : 2048,
         quality: 0.82,
       });
       if (next[idx].previewUrl) URL.revokeObjectURL(next[idx].previewUrl);
+      next[idx].fileOriginal = file;
       next[idx].previewUrl = preview.url;
       next[idx].previewBlob = preview.blob;
       next[idx].stageJSON = null;
       next[idx].annotatedBlob = null;
     } catch (e) {
       console.error('Preview generation failed', e);
-      if (next[idx].previewUrl) URL.revokeObjectURL(next[idx].previewUrl);
+      next[idx].fileOriginal = file;
       next[idx].previewUrl = URL.createObjectURL(file);
       next[idx].previewBlob = null;
     }
@@ -170,6 +160,33 @@ export default function SiteSurveyPage() {
     setSigns(next);
   };
 
+  // ---------- PREFILL ----------
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!jobId) return;
+      try {
+        const snap = await getDoc(doc(db, 'jobs', jobId));
+        if (!snap.exists()) return;
+        const d = snap.data() || {};
+        if (!alive) return;
+
+        setClient({
+          name: d.clientName || d.client || '',
+          company: d.company || '',
+          contact: d.contact || '',
+          phone: d.phone || '',
+          email: d.email || '',
+          address: d.address || '',
+          description: d.description || d.surveyDescription || '',
+        });
+      } catch (e) {
+        console.warn('prefill failed', e);
+      }
+    })();
+    return () => { alive = false; };
+  }, [jobId]);
+
   const onSaveSurvey = async () => {
     const anySignImage = signs.some(s => s.fileOriginal);
     if (!anySignImage && refPhotos.length === 0) {
@@ -180,7 +197,6 @@ export default function SiteSurveyPage() {
     setSaving(true);
     setBusy(true);
     try {
-      // 1) Collect annotation snapshots for each sign that has a preview (if user didn't click "Save Annotation")
       const signsWithSnaps = await Promise.all(signs.map(async (s) => {
         const ref = annotRefs.current[s.id];
         if (ref && ref.exportSnapshot && s.previewUrl) {
@@ -188,20 +204,19 @@ export default function SiteSurveyPage() {
             const snap = await ref.exportSnapshot();
             return { ...s, stageJSON: snap.stageJSON, annotatedBlob: snap.annotatedBlob };
           } catch {
-            return s; // keep as-is if export fails
+            return s;
           }
         }
         return s;
       }));
 
-      // 2) Save survey (uploads originals, annotated images, and reference photos)
       const surveyId = await createSurvey({
         client,
         signs: signsWithSnaps,
         referencePhotoFiles: refPhotos.map(p => p.file),
+        jobId,
       });
 
-      // 3) Fire the send-email function (ignore error but log it)
       try {
         const resp = await fetch(`${FUNCTIONS_BASE}/sendSurveyPdf`, {
           method: 'POST',
@@ -217,11 +232,9 @@ export default function SiteSurveyPage() {
         console.warn('sendSurveyPdf error:', err);
       }
 
-      // 4) Cleanup local blobs
       signs.forEach(s => { if (s.previewUrl?.startsWith('blob:')) URL.revokeObjectURL(s.previewUrl); });
       refPhotos.forEach(p => { if (p.url?.startsWith('blob:')) URL.revokeObjectURL(p.url); });
 
-      // 5) Redirect to job list
       history.push('/');
     } catch (e) {
       console.error(e);
@@ -234,7 +247,7 @@ export default function SiteSurveyPage() {
 
   return (
     <Box sx={{ p: isMobile ? 1 : 2, bgcolor: '#0f172a', minHeight: '100vh' }}>
-      <BusyOverlay open={busy} text="Saving survey… uploading photos" />
+      <UploadOverlay open={busy} text="Saving survey… Please don’t exit the app" />
 
       <Box
         sx={{
@@ -295,21 +308,10 @@ export default function SiteSurveyPage() {
         <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.2)' }} />
 
         {signs.map((s, i) => (
-          <Box
-            key={s.id}
-            sx={{
-              p: isMobile ? 1.25 : 2,
-              mb: isMobile ? 1.25 : 2,
-              borderRadius: 2,
-              border: '1px solid rgba(255,255,255,0.08)',
-              backgroundColor: 'rgba(17,24,39,0.8)',
-              color: 'white',
-            }}
-          >
+          <Box key={s.id} sx={{ p: 2, mb: 2, borderRadius: 2, border: '1px solid rgba(255,255,255,0.08)', backgroundColor: 'rgba(17,24,39,0.8)' }}>
             <Typography variant="h6" sx={{ mb: 1, color: 'white' }}>
               {s.name}
             </Typography>
-
             <TextField
               size={isMobile ? 'small' : 'medium'}
               label="Description"
@@ -326,35 +328,15 @@ export default function SiteSurveyPage() {
                 style: { color: 'white', background: 'rgba(255,255,255,0.08)' },
               }}
             />
-
             <input
               type="file"
               accept="image/*"
-              onChange={async (e) => {
-                const file = e.target.files?.[0] || null;
-                await onFile(i, file);
-              }}
-              style={{ marginBottom: 12, color: 'white' }}
+              onChange={async (e) => { await onFile(i, e.target.files?.[0] || null); }}
+              style={{ marginBottom: 12 }}
             />
-
             {s.previewUrl && (
               <ErrorBoundary>
-                <Suspense
-                  fallback={
-                    <Box
-                      sx={{
-                        p: 2,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 1,
-                        color: 'white',
-                      }}
-                    >
-                      <CircularProgress size={18} sx={{ color: 'white' }} />
-                      Loading annotation tool…
-                    </Box>
-                  }
-                >
+                <Suspense fallback={<Box sx={{ p: 2, color: 'white' }}><CircularProgress size={18} /> Loading annotation tool…</Box>}>
                   <SurveyAnnotator
                     ref={(r) => { annotRefs.current[s.id] = r; }}
                     file={s.previewUrl}
@@ -368,69 +350,27 @@ export default function SiteSurveyPage() {
         ))}
 
         <Box sx={{ display: 'flex', justifyContent: 'center', my: 1 }}>
-          <Button
-            fullWidth={isMobile}
-            variant="outlined"
-            sx={{ color: 'white', borderColor: 'white' }}
-            onClick={addSign}
-            disabled={busy}
-          >
+          <Button variant="outlined" sx={{ color: 'white', borderColor: 'white' }} onClick={addSign} disabled={busy}>
             Add another sign
           </Button>
         </Box>
 
-        {/* Reference photos */}
+        {/* Reference Photos */}
         <Divider sx={{ my: 2, borderColor: 'rgba(255,255,255,0.2)' }} />
         <Typography variant="h6" sx={{ color: 'white', mb: 1 }}>
           Additional Reference Photos (no annotations)
         </Typography>
-
-        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center', mb: 1 }}>
-          <Button
-            variant="outlined"
-            component="label"
-            sx={{ color: 'white', borderColor: 'white' }}
-            disabled={busy}
-          >
-            Upload Reference Photos
-            <input
-              hidden
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={(e) => {
-                const files = e.target.files;
-                if (files?.length) addRefPhotos(files);
-                e.target.value = '';
-              }}
-            />
-          </Button>
-          <Typography variant="body2" sx={{ opacity: 0.8 }}>
-            You can add site/context images here. These will be saved with the survey but won’t have annotations.
-          </Typography>
-        </Box>
+        <Button variant="outlined" component="label" sx={{ color: 'white', borderColor: 'white', mb: 1 }} disabled={busy}>
+          Upload Reference Photos
+          <input hidden type="file" accept="image/*" multiple onChange={(e)=>{ if (e.target.files?.length) addRefPhotos(e.target.files); e.target.value=''; }} />
+        </Button>
 
         {refPhotos.length > 0 && (
           <Grid container spacing={1} sx={{ mb: 2 }}>
             {refPhotos.map((p) => (
               <Grid item key={p.id}>
-                <Paper
-                  sx={{
-                    p: 0.5,
-                    borderRadius: 1,
-                    bgcolor: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 0.5,
-                  }}
-                >
-                  <img
-                    src={p.url}
-                    alt="ref"
-                    style={{ width: 110, height: 110, objectFit: 'cover', borderRadius: 4 }}
-                  />
+                <Paper sx={{ p: 0.5, borderRadius: 1, bgcolor: 'rgba(255,255,255,0.06)' }}>
+                  <img src={p.url} alt="ref" style={{ width: 110, height: 110, objectFit: 'cover', borderRadius: 4 }} />
                   <Tooltip title="Remove photo">
                     <IconButton size="small" sx={{ color: '#fff' }} onClick={() => removeRefPhoto(p.id)} disabled={busy}>
                       <DeleteIcon fontSize="small" />
@@ -443,13 +383,11 @@ export default function SiteSurveyPage() {
         )}
 
         <Box sx={{ display: 'flex', gap: 1, flexDirection: isMobile ? 'column' : 'row' }}>
-          <Button
-            fullWidth={isMobile}
-            variant="contained"
-            onClick={onSaveSurvey}
-            disabled={saving || busy}
-          >
+          <Button fullWidth={isMobile} variant="contained" onClick={onSaveSurvey} disabled={saving || busy}>
             {saving ? 'Saving…' : 'Save Survey'}
+          </Button>
+          <Button fullWidth={isMobile} variant="outlined" onClick={() => history.push('/')} disabled={busy}>
+            Cancel
           </Button>
         </Box>
       </Box>
