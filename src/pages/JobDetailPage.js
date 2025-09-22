@@ -161,6 +161,7 @@ export default function JobDetailPage() {
     loadAll();
   };
 
+  // ✅ Standardized to "completed"
   const completeJob = async () => {
     await updateDoc(doc(db, 'jobs', jobId), {
       status: 'completed',
@@ -169,7 +170,7 @@ export default function JobDetailPage() {
     history.push('/');
   };
   const reopenJob = async () => {
-    await updateDoc(doc(db, 'jobs', jobId), { status: 'in progress' });
+    await updateDoc(doc(db, 'jobs', jobId), { status: 'in progress', completedAt: null });
     loadAll();
   };
 
@@ -327,7 +328,7 @@ export default function JobDetailPage() {
         <Button variant="contained" onClick={() => history.push(`/jobs/${jobId}/edit`)}>Edit Job</Button>
         <Button variant="outlined" color="error" onClick={async () => { await deleteDoc(doc(db, 'jobs', jobId)); history.push('/'); }}>Delete Job</Button>
         <Button variant="outlined" onClick={() => history.push('/')}>Back to List</Button>
-        {job.status === 'completed' ? (
+        {String(job.status || '').toLowerCase() === 'completed' ? (
           <Button variant="outlined" color="warning" onClick={reopenJob}>Reopen Job</Button>
         ) : (
           <Button variant="outlined" color="success" onClick={completeJob}>Complete Job</Button>

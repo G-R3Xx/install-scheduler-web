@@ -4,7 +4,7 @@ import { Backdrop, Box, CircularProgress, Typography } from '@mui/material';
 
 export default function UploadOverlay({ open, text = "Uploading… Please don’t exit the app." }) {
   return (
-    <Backdrop open={open} sx={{ zIndex: 2000, color: '#fff' }}>
+    <Backdrop open={open} sx={{ zIndex: 2000, color: '#ffffffff' }}>
       <Box sx={{ display: 'grid', justifyItems: 'center', gap: 1.5 }}>
         <CircularProgress />
         <Typography sx={{ fontWeight: 600 }}>{text}</Typography>

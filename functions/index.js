@@ -1,5 +1,3 @@
-// functions/index.js
-
 const { onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
@@ -7,10 +5,10 @@ const sgMail = require('@sendgrid/mail');
 
 admin.initializeApp();
 const db = admin.firestore();
+const storage = admin.storage();   // <— needed!
 
 const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY');
 
-// --------- when a job is marked complete ---------
 exports.sendCompletionEmail = onDocumentUpdated(
   { document: 'jobs/{jobId}', secrets: [SENDGRID_API_KEY] },
   async (event) => {
@@ -18,13 +16,14 @@ exports.sendCompletionEmail = onDocumentUpdated(
     const after = event.data.after.data();
     const jobId = event.params.jobId;
 
-    if (before?.status === 'complete' || after?.status !== 'complete') return;
+    // Only trigger when status changes to "completed"
+    if (before?.status === 'completed' || after?.status !== 'completed') return;
 
     sgMail.setApiKey(SENDGRID_API_KEY.value());
     const job = after;
     const client = job.clientName || 'Unknown Client';
 
-    // ---- Load users map ----
+    // Load users map
     const usersSnap = await db.collection('users').get();
     const userMap = {};
     usersSnap.forEach((d) => {
@@ -36,7 +35,7 @@ exports.sendCompletionEmail = onDocumentUpdated(
       };
     });
 
-    // ---- Hours breakdown ----
+    // Hours breakdown
     const timeEntriesSnap = await db.collection(`jobs/${jobId}/timeEntries`).get();
     const timeEntries = timeEntriesSnap.docs.map((d) => d.data());
 
@@ -51,10 +50,10 @@ exports.sendCompletionEmail = onDocumentUpdated(
     }
 
     const allowed = job.allowedHours || null;
-    let hoursSection = `<p><strong>Total Hours:</strong> ${total}</p>`;
+    let hoursSection = `<p><strong>Total Hours:</strong> ${total.toFixed(2)}</p>`;
     if (allowed) {
       const color = total <= allowed ? 'green' : 'red';
-      hoursSection += `<p><strong>Quoted/Allowed Hours:</strong> ${allowed} <span style="color:${color}">(vs ${total})</span></p>`;
+      hoursSection += `<p><strong>Quoted/Allowed Hours:</strong> ${allowed} <span style="color:${color}">(vs ${total.toFixed(2)})</span></p>`;
     }
     if (Object.keys(perUser).length) {
       hoursSection += `<ul>`;
@@ -64,41 +63,41 @@ exports.sendCompletionEmail = onDocumentUpdated(
           userMap[uid]?.displayName ||
           userMap[uid]?.email ||
           uid;
-        hoursSection += `<li>${display}: ${hrs} hrs</li>`;
+        hoursSection += `<li>${display}: ${hrs.toFixed(2)} hrs</li>`;
       }
       hoursSection += `</ul>`;
     }
 
-    // ---- Installer notes ----
+    // Installer notes
     const notes = job.installerNotes || '—';
 
-    // ---- Photos & signature ----
+    // Photos & signature attachments
     const attachments = [];
-    if (Array.isArray(job.completedPhotos)) {
-      for (let i = 0; i < job.completedPhotos.length; i++) {
-        try {
-          const file = storage.file(
-            decodeURIComponent(new URL(job.completedPhotos[i]).pathname.replace(/^\/+/, ''))
-          );
-          const [data] = await file.download();
-          attachments.push({
-            content: data.toString('base64'),
-            filename: `photo_${i + 1}.jpg`,
-            type: 'image/jpeg',
-            disposition: 'attachment',
-          });
-        } catch (err) {
-          console.warn('Photo download failed', err.message);
-        }
+
+    // Completed photos (from subcollection)
+    const compSnap = await db.collection(`jobs/${jobId}/completedPhotos`).get();
+    let i = 1;
+    for (const docSnap of compSnap.docs) {
+      try {
+        const url = docSnap.data().url;
+        if (!url) continue;
+        const path = decodeURIComponent(new URL(url).pathname.replace(/^\/v0\/b\/[^/]+\/o\//, ''));
+        const [fileData] = await storage.bucket().file(path).download();
+        attachments.push({
+          content: fileData.toString('base64'),
+          filename: `photo_${i++}.jpg`,
+          type: 'image/jpeg',
+          disposition: 'attachment',
+        });
+      } catch (err) {
+        console.warn('Photo download failed', err.message);
       }
     }
 
     if (job.signatureURL) {
       try {
-        const file = storage.file(
-          decodeURIComponent(new URL(job.signatureURL).pathname.replace(/^\/+/, ''))
-        );
-        const [data] = await file.download();
+        const path = decodeURIComponent(new URL(job.signatureURL).pathname.replace(/^\/v0\/b\/[^/]+\/o\//, ''));
+        const [data] = await storage.bucket().file(path).download();
         attachments.push({
           content: data.toString('base64'),
           filename: `signature.png`,
@@ -110,10 +109,10 @@ exports.sendCompletionEmail = onDocumentUpdated(
       }
     }
 
-    // ---- Send email ----
+    // Send email
     const msg = {
-      to: 'management@example.com',
-      from: 'noreply@installscheduler.app',
+      to: 'printroom@tenderedge.com.au',
+      from: 'printroom@tenderedge.com.au',
       subject: `Job Completed — ${client}`,
       html: `
         <h2>Job Completed</h2>
