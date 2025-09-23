@@ -240,7 +240,7 @@ export default function JobListPage() {
                     {Number.isFinite(Number(j.allowedHours)) && (
                       <Chip
                         size="small"
-                        label={`Allowed ${Number(j.allowedHours)}h`}
+                        label={`Quoted ${Number(j.allowedHours)}h`}
                         sx={{
                           bgcolor: "rgba(0, 188, 212, 0.20)",
                           color: "#80deea",
