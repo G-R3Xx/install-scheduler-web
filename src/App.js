@@ -35,6 +35,13 @@ function AppRoutes() {
         </RequireAuth>
       </Route>
 
+      {/* IMPORTANT: put create routes BEFORE :jobId so they don't match as an ID */}
+      <Route exact path="/jobs/create">
+        <RequireAuth>
+          <CreateJobPage />
+        </RequireAuth>
+      </Route>
+      {/* Back-compat alias (some places still push /jobs/new) */}
       <Route exact path="/jobs/new">
         <RequireAuth>
           <CreateJobPage />
@@ -65,7 +72,13 @@ function AppRoutes() {
         </RequireAuth>
       </Route>
 
-<Route path="/surveys/new" component={SiteSurveyPage} />
+      {/* Protect surveys/new too, and keep it outside the :jobId segment */}
+      <Route exact path="/surveys/new">
+        <RequireAuth>
+          <SiteSurveyPage />
+        </RequireAuth>
+      </Route>
+
       {/* Fallback */}
       <Redirect to="/" />
     </Switch>

@@ -2,10 +2,12 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box, Typography, Button, Divider, Grid, Chip, TextField, Paper,
-  IconButton, CircularProgress, Backdrop
+  IconButton, CircularProgress, Backdrop, Dialog, DialogContent, Link
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
+import PictureAsPdfRoundedIcon from '@mui/icons-material/PictureAsPdfRounded';
+import InsertPhotoRoundedIcon from '@mui/icons-material/InsertPhotoRounded';
 import { useParams, useHistory } from 'react-router-dom';
 import {
   doc, getDoc, updateDoc, collection, addDoc, getDocs,
@@ -53,14 +55,22 @@ export default function JobDetailPage() {
   const [installerNotes, setInstallerNotes] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
 
-  const [completedPhotos, setCompletedPhotos] = useState([]);  // [{id,url,createdAt}]
-  const [timeEntries, setTimeEntries] = useState([]);          // [{id,userId,hours,createdAt}]
+  const [completedPhotos, setCompletedPhotos] = useState([]);   // [{id,url,createdAt}]
+  const [referencePhotos, setReferencePhotos] = useState([]);   // [{id,url,createdAt}]
+  const [plans, setPlans] = useState([]);                       // [{id,url,name,createdAt}]
+  const [timeEntries, setTimeEntries] = useState([]);           // [{id,userId,hours,createdAt}]
   const [newHours, setNewHours] = useState('');
   const [timerRunning, setTimerRunning] = useState(false);
   const [timerStart, setTimerStart] = useState(null);
 
   const [signatureURL, setSignatureURL] = useState(null);
   const [sigPad, setSigPad] = useState(null);
+
+  // Image preview dialog
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const openPreview = (url) => { setPreviewUrl(url); setPreviewOpen(true); };
+  const closePreview = () => { setPreviewOpen(false); setPreviewUrl(''); };
 
   const loadAll = useCallback(async () => {
     if (!jobId) return;
@@ -78,6 +88,12 @@ export default function JobDetailPage() {
 
       const compSnap = await getDocs(collection(db, 'jobs', jobId, 'completedPhotos'));
       setCompletedPhotos(compSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
+
+      const refSnap = await getDocs(collection(db, 'jobs', jobId, 'referencePhotos'));
+      setReferencePhotos(refSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
+
+      const planSnap = await getDocs(collection(db, 'jobs', jobId, 'plans'));
+      setPlans(planSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
 
       const hoursSnap = await getDocs(collection(db, 'jobs', jobId, 'timeEntries'));
       setTimeEntries(hoursSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
@@ -97,7 +113,7 @@ export default function JobDetailPage() {
     ).join(', ');
   }, [job, userMap]);
 
-  // --- Completed photos: upload & remove (maintain completedPhotoCount on job doc)
+  // --- Completed photos: upload & remove (keep counter for list chips)
   const handleUploadCompleted = async (files) => {
     const arr = Array.from(files || []);
     if (!arr.length) return;
@@ -111,7 +127,6 @@ export default function JobDetailPage() {
         await addDoc(collection(db, 'jobs', jobId, 'completedPhotos'), { url, createdAt: serverTimestamp() });
         uploaded += 1;
       }
-      // increment counter used by JobListPage chips
       if (uploaded > 0) {
         await updateDoc(doc(db, 'jobs', jobId), {
           completedPhotoCount: increment(uploaded),
@@ -124,18 +139,15 @@ export default function JobDetailPage() {
     }
   };
 
-  const removeFileDoc = async (item) => {
+  const removeCompletedPhoto = async (item) => {
     setBusy(true);
     try {
-      // best-effort delete from storage
       try {
-        // If item.url is a gs/http(s) URL, try to derive path for deletion
         const u = new URL(item.url);
         const path = decodeURIComponent(u.pathname.replace(/^\/v0\/b\/[^/]+\/o\//, ''));
         await deleteObject(ref(storage, path));
       } catch { /* ignore */ }
       await deleteDoc(doc(db, 'jobs', jobId, 'completedPhotos', item.id));
-      // decrement counter
       await updateDoc(doc(db, 'jobs', jobId), {
         completedPhotoCount: increment(-1),
         updatedAt: serverTimestamp(),
@@ -165,7 +177,6 @@ export default function JobDetailPage() {
       hours: h,
       createdAt: serverTimestamp(),
     });
-    // increment aggregate
     await updateDoc(doc(db, 'jobs', jobId), {
       hoursTotal: increment(h),
       updatedAt: serverTimestamp(),
@@ -178,7 +189,7 @@ export default function JobDetailPage() {
   const stopTimer = async () => {
     if (!timerRunning || !timerStart) return;
     const elapsedMs = Date.now() - timerStart;
-    const hours = elapsedMs / 3600000; // ms -> hr
+    const hours = elapsedMs / 3600000;
     await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
       userId: currentUser?.uid || 'unknown',
       hours,
@@ -250,6 +261,22 @@ export default function JobDetailPage() {
     <Box sx={{ p: 2, maxWidth: 1000, mx: 'auto' }}>
       <BusyOverlay open={busy} text="Working… uploading files" />
 
+      {/* Image preview dialog */}
+      <Dialog open={previewOpen} onClose={closePreview} maxWidth="md" fullWidth>
+        <DialogContent sx={{ p: 0, bgcolor: '#000' }}>
+          {previewUrl && (
+            <Box sx={{ width: '100%', display: 'grid', justifyItems: 'center', bgcolor: '#000' }}>
+              <img
+                src={previewUrl}
+                alt="preview"
+                style={{ maxWidth: '100%', maxHeight: '80vh', objectFit: 'contain' }}
+                onClick={closePreview}
+              />
+            </Box>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* Header / summary */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h5" sx={{ mb: 1 }}>
@@ -292,7 +319,88 @@ export default function JobDetailPage() {
         )}
       </Paper>
 
-      {/* Completed Photos */}
+      {/* Reference Photos (view only) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <InsertPhotoRoundedIcon fontSize="small" /> Reference Photos
+        </Typography>
+        <Grid container spacing={1} mt={1}>
+          {referencePhotos.length > 0 ? (
+            referencePhotos.map((p) => (
+              <Grid item key={p.id}>
+                <Box
+                  sx={{ position: 'relative', width: 120, height: 90, cursor: 'zoom-in' }}
+                  onClick={() => openPreview(p.url)}
+                >
+                  <img
+                    src={p.url}
+                    alt="reference"
+                    style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4 }}
+                  />
+                </Box>
+              </Grid>
+            ))
+          ) : (
+            <Grid item xs={12}>
+              <Typography color="text.secondary">No reference photos.</Typography>
+            </Grid>
+          )}
+        </Grid>
+      </Paper>
+
+      {/* Plans (PDF or images, view only) */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <PictureAsPdfRoundedIcon fontSize="small" /> Plans
+        </Typography>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mt: 1 }}>
+          {plans.length > 0 ? (
+            plans.map((pl) => {
+              const url = pl.url;
+              const name = pl.name || url?.split('?')[0]?.split('/').pop() || 'plan';
+              const isImage = /\.(png|jpg|jpeg|webp|gif)$/i.test(name);
+              const isPdf = /\.pdf$/i.test(name);
+
+              if (isImage) {
+                return (
+                  <Box
+                    key={pl.id}
+                    sx={{ width: 140, height: 100, cursor: 'zoom-in' }}
+                    onClick={() => openPreview(url)}
+                    title={name}
+                  >
+                    <img
+                      src={url}
+                      alt={name}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4 }}
+                    />
+                  </Box>
+                );
+              }
+
+              return (
+                <Chip
+                  key={pl.id}
+                  icon={<PictureAsPdfRoundedIcon />}
+                  label={name}
+                  clickable
+                  onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}
+                  sx={{
+                    bgcolor: isPdf ? 'rgba(244, 67, 54, 0.15)' : 'rgba(255,255,255,0.08)',
+                    color: isPdf ? '#ef9a9a' : '#90caf9',
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    fontWeight: 600,
+                  }}
+                />
+              );
+            })
+          ) : (
+            <Typography color="text.secondary">No plans uploaded.</Typography>
+          )}
+        </Box>
+      </Paper>
+
+      {/* Completed Photos (with enlarge + delete) */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6">Completed Photos</Typography>
         <Button variant="outlined" component="label" sx={{ mt: 1 }}>
@@ -304,11 +412,16 @@ export default function JobDetailPage() {
           {completedPhotos.map((p) => (
             <Grid item key={p.id}>
               <Box sx={{ position: 'relative', width: 120, height: 90 }}>
-                <img src={p.url} alt="completed" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <img
+                  src={p.url}
+                  alt="completed"
+                  style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4, cursor: 'zoom-in' }}
+                  onClick={() => openPreview(p.url)}
+                />
                 <IconButton
                   size="small"
-                  onClick={() => removeFileDoc(p)}
-                  sx={{ position: 'absolute', top: 0, right: 0, bgcolor: 'rgba(0,0,0,0.45)', color: '#fff' }}
+                  onClick={() => removeCompletedPhoto(p)}
+                  sx={{ position: 'absolute', top: 2, right: 2, bgcolor: 'rgba(0,0,0,0.5)', color: '#fff' }}
                 >
                   <DeleteIcon fontSize="small" />
                 </IconButton>
@@ -341,11 +454,13 @@ export default function JobDetailPage() {
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6">Client Signature</Typography>
         {signatureURL ? (
-          <img
-            src={signatureURL}
-            alt="signature"
-            style={{ border: '1px solid #ccc', height: 120, borderRadius: 4, background: '#fff' }}
-          />
+          <Link onClick={() => openPreview(signatureURL)} underline="none" sx={{ cursor: 'zoom-in' }}>
+            <img
+              src={signatureURL}
+              alt="signature"
+              style={{ border: '1px solid #ccc', height: 120, borderRadius: 4, background: '#fff' }}
+            />
+          </Link>
         ) : (
           <Box>
             <SignatureCanvas

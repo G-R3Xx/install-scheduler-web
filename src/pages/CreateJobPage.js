@@ -1,349 +1,382 @@
 // src/pages/CreateJobPage.js
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from 'react';
 import {
   Box,
-  Button,
-  Divider,
   Paper,
   TextField,
   Typography,
+  Button,
+  Grid,
+  Chip,
+  Backdrop,
+  CircularProgress,
+  Switch,
+  FormControlLabel,
+  Divider,
   Stack,
-} from "@mui/material";
-import { useHistory } from "react-router-dom";
-import {
-  addDoc,
-  collection,
-  getDocs,
-  serverTimestamp,
-  Timestamp,
-} from "firebase/firestore";
-import { db } from "../firebase/firebase";
-import { useAuth } from "../contexts/AuthContext";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+  Link,
+} from '@mui/material';
+import { useHistory } from 'react-router-dom';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { db, storage } from '../firebase/firebase';
+import { useAuth } from '../contexts/AuthContext';
+
+function BusyOverlay({ open, text }) {
+  return (
+    <Backdrop open={open} sx={{ zIndex: 2000, color: '#fff' }}>
+      <Box sx={{ textAlign: 'center' }}>
+        <CircularProgress sx={{ mb: 1 }} />
+        <Typography sx={{ fontWeight: 600 }}>{text}</Typography>
+        <Typography variant="body2" sx={{ opacity: 0.9 }}>
+          Please don’t close this window.
+        </Typography>
+      </Box>
+    </Backdrop>
+  );
+}
 
 export default function CreateJobPage() {
   const history = useHistory();
-  const { currentUser } = useAuth();
-  const storage = getStorage();
+  const { currentUser, userMap } = useAuth();
 
-  const [form, setForm] = useState({
-    type: "job", // "job" or "survey"
-    clientName: "",
-    company: "",
-    contact: "",
-    phone: "",
-    email: "",
-    address: "",
-    description: "",
-    installDate: null,
-    installTime: "",
-    assignedTo: [],
-    companyLogoUrl: null,
-    allowedHours: "",
-  });
-  const [allUsers, setAllUsers] = useState([]);
+  // Core fields
+  const [clientName, setClientName] = useState('');
+  const [company, setCompany] = useState('');
+  const [contact, setContact] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [address, setAddress] = useState('');
+  const [description, setDescription] = useState('');
+
+  // Schedule / assignment
+  const [installDate, setInstallDate] = useState(''); // yyyy-mm-dd
+  const [installTime, setInstallTime] = useState(''); // HH:mm
+  const [assignedTo, setAssignedTo] = useState([]);   // array of userIds
+
+  // Hours / survey
+  const [allowedHours, setAllowedHours] = useState('');
+  const [isSurveyRequest, setIsSurveyRequest] = useState(false);
+
+  // Uploads
+  const [logoFile, setLogoFile] = useState(null);
+  const [refPhotoFiles, setRefPhotoFiles] = useState([]);
+  const [planFiles, setPlanFiles] = useState([]);
+
+  // Busy overlay
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [uploadingAssets, setUploadingAssets] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const snap = await getDocs(collection(db, "users"));
-        const arr = [];
-        snap.forEach((d) => arr.push({ id: d.id, ...d.data() }));
-        setAllUsers(arr);
-      } catch {}
-    })();
-  }, []);
+  // Build a sorted list of users from userMap
+  const users = useMemo(() => {
+    const arr = Object.entries(userMap || {}).map(([uid, u]) => ({
+      uid,
+      shortName: u?.shortName || '',
+      displayName: u?.displayName || '',
+      email: u?.email || '',
+    }));
+    arr.sort((a, b) => (a.shortName || a.displayName || '').localeCompare(b.shortName || b.displayName || ''));
+    return arr;
+  }, [userMap]);
 
-  const canSave = useMemo(
-    () =>
-      form.clientName.trim() &&
-      (form.email.trim() || form.phone.trim()) &&
-      !!form.installDate,
-    [form]
-  );
-
-  const toggleAssignee = (uid) => {
-    setForm((f) => {
-      const exists = f.assignedTo.some((u) => (u.id || u) === uid);
-      return {
-        ...f,
-        assignedTo: exists
-          ? f.assignedTo.filter((u) => (u.id || u) !== uid)
-          : [...f.assignedTo, { id: uid }],
-      };
-    });
+  const toggleAssign = (uid) => {
+    setAssignedTo((prev) =>
+      prev.includes(uid) ? prev.filter((x) => x !== uid) : [...prev, uid]
+    );
   };
 
-  const handleLogoUpload = async (file) => {
-    if (!file) return;
-    try {
-      const storageRef = ref(storage, `logos/${Date.now()}_${file.name}`);
-      await uploadBytes(storageRef, file);
-      const url = await getDownloadURL(storageRef);
-      setForm((f) => ({ ...f, companyLogoUrl: url }));
-    } catch (err) {
-      console.error("Logo upload failed", err);
-      alert("Upload failed, please try another image.");
-    }
-  };
-
-  const buildInstallTimestamp = () => {
-    if (!form.installDate) return null;
-    const base = new Date(form.installDate);
-    if (form.installTime) {
-      const [h, m] = form.installTime.split(":").map(Number);
-      base.setHours(h || 0, m || 0, 0, 0);
-    } else {
-      base.setHours(0, 0, 0, 0);
-    }
-    return Timestamp.fromDate(base);
-  };
+  const clearAssigned = () => setAssignedTo([]);
 
   const handleCreate = async () => {
     try {
       setSaving(true);
-      setError("");
 
-      const ts = buildInstallTimestamp();
-      const jobType = form.type === "survey" ? "survey-request" : "job";
-
-      await addDoc(collection(db, "jobs"), {
-        clientName: form.clientName || "",
-        company: form.company || "",
-        contact: form.contact || "",
-        phone: form.phone || "",
-        email: form.email || "",
-        address: form.address || "",
-        description: form.description || "",
-        jobType,
-        status: "in progress",
-        installDate: ts,
-        installTime: form.installTime || null,
-        assignedTo: form.assignedTo.map((u) => u.id || u),
-        companyLogoUrl: form.companyLogoUrl || null,
-        allowedHours: form.allowedHours ? Number(form.allowedHours) : null,
-        completedPhotos: [],
+      const payload = {
+        clientName: clientName || '',
+        company: company || '',
+        contact: contact || '',
+        phone: phone || '',
+        email: email || '',
+        address: address || '',
+        description: description || '',
+        allowedHours: allowedHours ? Number(allowedHours) : null,
+        installTime: installTime || null,
+        installDate: installDate || null,
+        assignedTo, // <- array of userIds from chips
+        status: isSurveyRequest ? 'survey-request' : 'in progress',
+        isSurveyRequest,
         createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
         createdBy: currentUser?.uid || null,
-      });
+        hoursTotal: 0,
+        completedPhotoCount: 0,
+      };
 
-      // Go back to job list
-      history.push("/jobs");
-    } catch (e) {
-      setError(e.message || "Failed to create job.");
+      const jobRef = await addDoc(collection(db, 'jobs'), payload);
+
+      // Upload assets after doc creation
+      try {
+        setUploadingAssets(true);
+
+        if (logoFile) {
+          const r = ref(storage, `jobs/${jobRef.id}/logo_${Date.now()}_${logoFile.name}`);
+          await uploadBytes(r, logoFile);
+          const logoUrl = await getDownloadURL(r);
+          await addDoc(collection(db, 'jobs', jobRef.id, 'assets'), {
+            type: 'logo',
+            url: logoUrl,
+            fileName: logoFile.name,
+            createdAt: serverTimestamp(),
+          });
+        }
+
+        for (const f of refPhotoFiles) {
+          const r = ref(storage, `jobs/${jobRef.id}/reference/${Date.now()}_${f.name}`);
+          await uploadBytes(r, f);
+          const url = await getDownloadURL(r);
+          await addDoc(collection(db, 'jobs', jobRef.id, 'referencePhotos'), {
+            url,
+            fileName: f.name,
+            createdAt: serverTimestamp(),
+          });
+        }
+
+        for (const f of planFiles) {
+          const r = ref(storage, `jobs/${jobRef.id}/plans/${Date.now()}_${f.name}`);
+          await uploadBytes(r, f);
+          const url = await getDownloadURL(r);
+          await addDoc(collection(db, 'jobs', jobRef.id, 'plans'), {
+            url,
+            fileName: f.name,
+            createdAt: serverTimestamp(),
+          });
+        }
+      } finally {
+        setUploadingAssets(false);
+      }
+
+      history.push('/');
+    } catch (err) {
+      console.error('Create job failed:', err);
+      alert('Failed to create job. Please check fields and try again.');
     } finally {
       setSaving(false);
     }
   };
 
-  const dateValue = form.installDate
-    ? new Date(
-        form.installDate.getTime() -
-          new Date().getTimezoneOffset() * 60000
-      )
-        .toISOString()
-        .slice(0, 10)
-    : "";
-
   return (
-    <Box sx={{ p: 2, maxWidth: 900, mx: "auto" }}>
-      <Typography variant="h5" sx={{ mb: 2 }}>
-        Create — Job or Survey
-      </Typography>
-      <Paper sx={{ p: 2 }}>
-        <Stack spacing={2}>
-          {/* Type toggle */}
-          <Box>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>
-              Type
-            </Typography>
-            <div
-              role="group"
-              aria-label="type"
-              style={{ display: "flex", gap: 12 }}
-            >
-              <Button
-                size="small"
-                variant={form.type === "job" ? "contained" : "outlined"}
-                onClick={() => setForm((f) => ({ ...f, type: "job" }))}
-              >
-                Job
-              </Button>
-              <Button
-                size="small"
-                variant={form.type === "survey" ? "contained" : "outlined"}
-                onClick={() => setForm((f) => ({ ...f, type: "survey" }))}
-              >
-                Survey Request
-              </Button>
-            </div>
-          </Box>
+    <Box sx={{ p: 2, maxWidth: 1100, mx: 'auto' }}>
+      <BusyOverlay open={saving || uploadingAssets} text={uploadingAssets ? 'Uploading files…' : 'Saving…'} />
 
-          <Divider />
+      <Paper sx={{ p: { xs: 2, md: 3 } }}>
+        <Typography variant="h5" sx={{ mb: 2, fontWeight: 700 }}>
+          Create Job
+        </Typography>
 
-          <TextField
-            label="Client / Job Name"
-            value={form.clientName}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, clientName: e.target.value }))
-            }
-          />
-          <TextField
-            label="Company"
-            value={form.company}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, company: e.target.value }))
-            }
-          />
-          <TextField
-            label="Contact"
-            value={form.contact}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, contact: e.target.value }))
-            }
-          />
-          <TextField
-            label="Email"
-            type="email"
-            value={form.email}
-            onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-          />
-          <TextField
-            label="Phone"
-            value={form.phone}
-            onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-          />
-          <TextField
-            label="Address"
-            value={form.address}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, address: e.target.value }))
-            }
-          />
-          <TextField
-            label="Description"
-            value={form.description}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, description: e.target.value }))
-            }
-            multiline
-            minRows={2}
-          />
+        {/* BASIC INFO */}
+        <Typography variant="overline" sx={{ opacity: 0.8 }}>
+          Basic Info
+        </Typography>
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid item xs={12} md={6}>
+            <TextField label="Client Name" fullWidth value={clientName} onChange={(e) => setClientName(e.target.value)} />
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <TextField label="Company" fullWidth value={company} onChange={(e) => setCompany(e.target.value)} />
+          </Grid>
 
-          {/* Logo upload */}
-          <Box>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>
-              Company Logo
-            </Typography>
-            <Button variant="outlined" component="label">
-              Upload Logo
-              <input
-                hidden
-                type="file"
-                accept="image/*"
-                onChange={(e) => handleLogoUpload(e.target.files?.[0])}
-              />
-            </Button>
-            {form.companyLogoUrl && (
-              <Box sx={{ mt: 1 }}>
-                <img
-                  src={form.companyLogoUrl}
-                  alt="logo"
-                  style={{
-                    maxHeight: 60,
-                    maxWidth: 120,
-                    objectFit: "contain",
-                  }}
-                />
-              </Box>
-            )}
-          </Box>
+          <Grid item xs={12} md={4}>
+            <TextField label="Contact" fullWidth value={contact} onChange={(e) => setContact(e.target.value)} />
+          </Grid>
+          <Grid item xs={12} md={4}>
+            <TextField label="Phone" fullWidth value={phone} onChange={(e) => setPhone(e.target.value)} />
+          </Grid>
+          <Grid item xs={12} md={4}>
+            <TextField label="Email" fullWidth value={email} onChange={(e) => setEmail(e.target.value)} />
+          </Grid>
 
-          {/* Date + optional time */}
-          <Box>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>
-              Scheduled date
-            </Typography>
+          <Grid item xs={12}>
+            <TextField label="Address" fullWidth value={address} onChange={(e) => setAddress(e.target.value)} />
+          </Grid>
+
+          <Grid item xs={12}>
             <TextField
+              label="Description"
+              fullWidth
+              multiline
+              minRows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </Grid>
+        </Grid>
+
+        <Divider sx={{ my: 2 }} />
+
+        {/* SCHEDULING */}
+        <Typography variant="overline" sx={{ opacity: 0.8 }}>
+          Scheduling & Assignment
+        </Typography>
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid item xs={12} md={4}>
+            <TextField
+              label="Install Date"
               type="date"
-              value={dateValue}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  installDate: e.target.value
-                    ? new Date(e.target.value)
-                    : null,
-                }))
-              }
+              fullWidth
               InputLabelProps={{ shrink: true }}
+              value={installDate}
+              onChange={(e) => setInstallDate(e.target.value)}
             />
-          </Box>
-
-          <Box>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>
-              Scheduled time (optional)
-            </Typography>
+          </Grid>
+          <Grid item xs={12} md={4}>
             <TextField
+              label="Install Time"
               type="time"
-              value={form.installTime || ""}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, installTime: e.target.value }))
-              }
+              fullWidth
               InputLabelProps={{ shrink: true }}
+              value={installTime}
+              onChange={(e) => setInstallTime(e.target.value)}
             />
-          </Box>
+          </Grid>
 
-          {/* Allowed hours */}
-          <TextField
-            type="number"
-            label="Quoted / Allowed Hours"
-            value={form.allowedHours}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, allowedHours: e.target.value }))
-            }
-          />
+          <Grid item xs={12} md={4}>
+            <TextField
+              label="Quoted / Allowed Hours"
+              type="number"
+              fullWidth
+              value={allowedHours}
+              inputProps={{ min: 0, step: '0.25' }}
+              onChange={(e) => setAllowedHours(e.target.value)}
+            />
+          </Grid>
 
-          {/* Assign */}
-          <Box>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>
-              Assign to
-            </Typography>
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1 }}>
-              {allUsers.map((u) => {
-                const selected = form.assignedTo.some(
-                  (x) => (x.id || x) === u.id
-                );
+          <Grid item xs={12} md={8}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+              <Typography variant="subtitle2">Assigned To</Typography>
+              {!!assignedTo.length && (
+                <Chip size="small" label={`${assignedTo.length} selected`} />
+              )}
+              {!!assignedTo.length && (
+                <Link component="button" variant="caption" onClick={clearAssigned} sx={{ ml: 'auto' }}>
+                  Clear
+                </Link>
+              )}
+            </Box>
+
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+              {users.map((u) => {
+                const selected = assignedTo.includes(u.uid);
+                const label = u.shortName || u.displayName || u.email || u.uid;
                 return (
-                  <Button
-                    key={u.id}
-                    variant={selected ? "contained" : "outlined"}
-                    size="small"
-                    onClick={() => toggleAssignee(u.id)}
-                  >
-                    {u.shortName || u.displayName || "User"}
-                  </Button>
+                  <Chip
+                    key={u.uid}
+                    label={label}
+                    color={selected ? 'primary' : 'default'}
+                    variant={selected ? 'filled' : 'outlined'}
+                    onClick={() => toggleAssign(u.uid)}
+                    sx={{ cursor: 'pointer' }}
+                  />
                 );
               })}
+              {!users.length && (
+                <Typography variant="body2" sx={{ opacity: 0.7 }}>
+                  No users found.
+                </Typography>
+              )}
             </Box>
-          </Box>
+          </Grid>
 
-          {error && <Typography color="error">{error}</Typography>}
+          <Grid item xs={12} md={4} sx={{ display: 'flex', alignItems: 'center' }}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={isSurveyRequest}
+                  onChange={(e) => setIsSurveyRequest(e.target.checked)}
+                />
+              }
+              label="Survey Request"
+            />
+          </Grid>
+        </Grid>
 
-          <Box sx={{ display: "flex", gap: 1 }}>
-            <Button
-              disabled={!canSave || saving}
-              variant="contained"
-              onClick={handleCreate}
-            >
-              {saving ? "Saving…" : "Create"}
-            </Button>
-            <Button variant="outlined" onClick={() => history.push("/jobs")}>
-              Cancel
-            </Button>
-          </Box>
-        </Stack>
+        <Divider sx={{ my: 2 }} />
+
+        {/* UPLOADS */}
+        <Typography variant="overline" sx={{ opacity: 0.8 }}>
+          Uploads
+        </Typography>
+        <Grid container spacing={2}>
+          {/* Logo */}
+          <Grid item xs={12} md={4}>
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Company Logo</Typography>
+              <Button variant="outlined" component="label">
+                {logoFile ? 'Change Company Logo' : 'Upload Company Logo'}
+                <input
+                  hidden
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
+                />
+              </Button>
+              {logoFile && <Chip label={logoFile.name} size="small" />}
+            </Stack>
+          </Grid>
+
+          {/* Reference photos */}
+          <Grid item xs={12} md={4}>
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Reference Photos</Typography>
+              <Button variant="outlined" component="label">
+                Select Images
+                <input
+                  hidden
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={(e) => setRefPhotoFiles(Array.from(e.target.files || []))}
+                />
+              </Button>
+              {!!refPhotoFiles.length && (
+                <Typography variant="caption" sx={{ opacity: 0.8 }}>
+                  {refPhotoFiles.length} image{refPhotoFiles.length > 1 ? 's' : ''} selected
+                </Typography>
+              )}
+            </Stack>
+          </Grid>
+
+          {/* Plans PDFs */}
+          <Grid item xs={12} md={4}>
+            <Stack spacing={1}>
+              <Typography variant="subtitle2">Plans (PDF)</Typography>
+              <Button variant="outlined" component="label">
+                Select PDF(s)
+                <input
+                  hidden
+                  type="file"
+                  accept="application/pdf"
+                  multiple
+                  onChange={(e) => setPlanFiles(Array.from(e.target.files || []))}
+                />
+              </Button>
+              {!!planFiles.length && (
+                <Typography variant="caption" sx={{ opacity: 0.8 }}>
+                  {planFiles.length} PDF{planFiles.length > 1 ? 's' : ''} selected
+                </Typography>
+              )}
+            </Stack>
+          </Grid>
+        </Grid>
+
+        {/* ACTIONS */}
+        <Box sx={{ mt: 3, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+          <Button variant="contained" onClick={handleCreate} disabled={saving || uploadingAssets}>
+            Create
+          </Button>
+          <Button variant="outlined" onClick={() => history.push('/')}>
+            Cancel
+          </Button>
+        </Box>
       </Paper>
     </Box>
   );
