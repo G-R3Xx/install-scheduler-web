@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box, Typography, Button, Divider, Grid, Chip, TextField, Paper,
-  IconButton, CircularProgress, Backdrop, Dialog, DialogContent, Link
+  IconButton, CircularProgress, Backdrop, Dialog, DialogTitle, DialogContent, DialogActions, Link, Stack
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
@@ -11,7 +11,7 @@ import InsertPhotoRoundedIcon from '@mui/icons-material/InsertPhotoRounded';
 import { useParams, useHistory } from 'react-router-dom';
 import {
   doc, getDoc, updateDoc, collection, addDoc, getDocs,
-  serverTimestamp, deleteDoc, increment
+  serverTimestamp, deleteDoc, Timestamp
 } from 'firebase/firestore';
 import { db, storage } from '../firebase/firebase';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
@@ -42,6 +42,11 @@ const fmtDate = (date) =>
 const fmtTime = (date) =>
   !date ? '' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
 
+const fmtTimeHM = (date) =>
+  !date ? '—' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 export default function JobDetailPage() {
   const params = useParams();
   const jobId = params.id || params.jobId;
@@ -58,13 +63,20 @@ export default function JobDetailPage() {
   const [completedPhotos, setCompletedPhotos] = useState([]);   // [{id,url,createdAt}]
   const [referencePhotos, setReferencePhotos] = useState([]);   // [{id,url,createdAt}]
   const [plans, setPlans] = useState([]);                       // [{id,url,name,createdAt}]
-  const [timeEntries, setTimeEntries] = useState([]);           // [{id,userId,hours,createdAt}]
+  const [timeEntries, setTimeEntries] = useState([]);           // [{id,userId,hours,createdAt,start,end,source}]
   const [newHours, setNewHours] = useState('');
-  const [timerRunning, setTimerRunning] = useState(false);
-  const [timerStart, setTimerStart] = useState(null);
 
-  const [signatureURL, setSignatureURL] = useState(null);
+  // Timer (persistent, backed by Firestore running entry)
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerStart, setTimerStart] = useState(null); // ms
+  const [elapsed, setElapsed] = useState(0);
+  const LS_TIMER_START_KEY = `timer:${jobId}:startMs`;
+  const LS_TIMER_ENTRY_KEY = `timer:${jobId}:entryId`;
+
+  // Signature dialog
+  const [sigDialogOpen, setSigDialogOpen] = useState(false);
   const [sigPad, setSigPad] = useState(null);
+  const [signatureURL, setSignatureURL] = useState(null);
 
   // Image preview dialog
   const [previewUrl, setPreviewUrl] = useState('');
@@ -104,6 +116,23 @@ export default function JobDetailPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  // Restore timer on mount and keep ticking
+  useEffect(() => {
+    const startMs = Number(localStorage.getItem(LS_TIMER_START_KEY));
+    const entryId = localStorage.getItem(LS_TIMER_ENTRY_KEY);
+    if (Number.isFinite(startMs) && entryId) {
+      setTimerRunning(true);
+      setTimerStart(startMs);
+      setElapsed(Date.now() - startMs);
+    }
+  }, [jobId]);
+
+  useEffect(() => {
+    if (!timerRunning || !timerStart) return;
+    const id = setInterval(() => setElapsed(Date.now() - timerStart), 1000);
+    return () => clearInterval(id);
+  }, [timerRunning, timerStart]);
+
   const assignedNames = useMemo(() => {
     if (!job) return '—';
     const ids = Array.isArray(job.assignedTo) ? job.assignedTo : job.assignedTo ? [job.assignedTo] : [];
@@ -113,25 +142,18 @@ export default function JobDetailPage() {
     ).join(', ');
   }, [job, userMap]);
 
-  // --- Completed photos: upload & remove (keep counter for list chips)
+  // --- Completed photos: upload & remove
   const handleUploadCompleted = async (files) => {
     const arr = Array.from(files || []);
     if (!arr.length) return;
     setBusy(true);
     try {
-      let uploaded = 0;
       for (const f of arr) {
         const r = ref(storage, `jobs/${jobId}/completed/${Date.now()}_${f.name}`);
         await uploadBytes(r, f);
+        // ✅ Always store the FULL download URL (with token)
         const url = await getDownloadURL(r);
         await addDoc(collection(db, 'jobs', jobId, 'completedPhotos'), { url, createdAt: serverTimestamp() });
-        uploaded += 1;
-      }
-      if (uploaded > 0) {
-        await updateDoc(doc(db, 'jobs', jobId), {
-          completedPhotoCount: increment(uploaded),
-          updatedAt: serverTimestamp(),
-        });
       }
       await loadAll();
     } finally {
@@ -142,16 +164,13 @@ export default function JobDetailPage() {
   const removeCompletedPhoto = async (item) => {
     setBusy(true);
     try {
+      // Try delete by URL path portion
       try {
         const u = new URL(item.url);
         const path = decodeURIComponent(u.pathname.replace(/^\/v0\/b\/[^/]+\/o\//, ''));
         await deleteObject(ref(storage, path));
-      } catch { /* ignore */ }
+      } catch { /* ignore parse errors */ }
       await deleteDoc(doc(db, 'jobs', jobId, 'completedPhotos', item.id));
-      await updateDoc(doc(db, 'jobs', jobId), {
-        completedPhotoCount: increment(-1),
-        updatedAt: serverTimestamp(),
-      });
       await loadAll();
     } finally {
       setBusy(false);
@@ -168,39 +187,75 @@ export default function JobDetailPage() {
     }
   };
 
-  // --- Hours: manual + timer (maintain hoursTotal on job doc)
+  // --- Manual hours
   const addHours = async () => {
     const h = parseFloat(newHours);
     if (!Number.isFinite(h) || h <= 0) return;
     await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
       userId: currentUser?.uid || 'unknown',
+      userShortName: userMap?.[currentUser?.uid || '']?.shortName,
       hours: h,
       createdAt: serverTimestamp(),
-    });
-    await updateDoc(doc(db, 'jobs', jobId), {
-      hoursTotal: increment(h),
-      updatedAt: serverTimestamp(),
+      source: 'manual',
     });
     setNewHours('');
     loadAll();
   };
 
-  const startTimer = () => { setTimerRunning(true); setTimerStart(Date.now()); };
+  // --- Timer start/stop with running entry
+  const startTimer = async () => {
+    if (!currentUser) return;
+    const startMs = Date.now();
+    const startTs = Timestamp.fromDate(new Date(startMs));
+    const docRef = await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
+      userId: currentUser.uid,
+      userShortName: userMap?.[currentUser.uid]?.shortName,
+      start: startTs,
+      end: null,
+      createdAt: serverTimestamp(),
+      source: 'timer',
+    });
+    localStorage.setItem(LS_TIMER_START_KEY, String(startMs));
+    localStorage.setItem(LS_TIMER_ENTRY_KEY, docRef.id);
+
+    setTimerRunning(true);
+    setTimerStart(startMs);
+    setElapsed(0);
+  };
+
   const stopTimer = async () => {
     if (!timerRunning || !timerStart) return;
-    const elapsedMs = Date.now() - timerStart;
+    const entryId = localStorage.getItem(LS_TIMER_ENTRY_KEY);
+    const startMs = Number(localStorage.getItem(LS_TIMER_START_KEY));
+    const startMillis = Number.isFinite(startMs) ? startMs : Date.now();
+    const elapsedMs = Date.now() - startMillis;
     const hours = elapsedMs / 3600000;
-    await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
-      userId: currentUser?.uid || 'unknown',
-      hours,
-      createdAt: serverTimestamp(),
-    });
-    await updateDoc(doc(db, 'jobs', jobId), {
-      hoursTotal: increment(hours),
-      updatedAt: serverTimestamp(),
-    });
+
+    if (entryId) {
+      try {
+        await updateDoc(doc(db, 'jobs', jobId, 'timeEntries', entryId), {
+          end: serverTimestamp(),
+          hours,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (e) {
+        console.error('Failed to close timer entry', e);
+      }
+    } else {
+      await addDoc(collection(db, 'jobs', jobId, 'timeEntries'), {
+        userId: currentUser?.uid || 'unknown',
+        userShortName: userMap?.[currentUser?.uid || '']?.shortName,
+        hours,
+        createdAt: serverTimestamp(),
+        source: 'timer-fallback',
+      });
+    }
+
+    localStorage.removeItem(LS_TIMER_START_KEY);
+    localStorage.removeItem(LS_TIMER_ENTRY_KEY);
     setTimerRunning(false);
     setTimerStart(null);
+    setElapsed(0);
     loadAll();
   };
 
@@ -219,6 +274,9 @@ export default function JobDetailPage() {
   };
 
   // --- Signature
+  const openSignatureDialog = () => setSigDialogOpen(true);
+  const closeSignatureDialog = () => setSigDialogOpen(false);
+
   const saveSignature = async () => {
     if (!sigPad || sigPad.isEmpty()) return;
     setBusy(true);
@@ -230,26 +288,48 @@ export default function JobDetailPage() {
       const url = await getDownloadURL(r);
       await updateDoc(doc(db, 'jobs', jobId), { signatureURL: url, updatedAt: serverTimestamp() });
       setSignatureURL(url);
+      closeSignatureDialog();
     } finally {
       setBusy(false);
     }
   };
 
-  // ---- Derived
+  // ---- Derived totals
   const totalHours = useMemo(
-    () => timeEntries.reduce((s, e) => s + (Number(e.hours) || 0), 0),
+    () => round2(timeEntries.reduce((s, e) => s + (Number(e.hours) || 0), 0)),
     [timeEntries]
   );
-  const hoursByUser = useMemo(() => {
-    const map = {};
+
+  // Group entries by user for readability
+  const entriesByUser = useMemo(() => {
+    const map = new Map();
     for (const e of timeEntries) {
       const uid = e.userId || 'unknown';
-      map[uid] = (map[uid] || 0) + (Number(e.hours) || 0);
+      if (!map.has(uid)) map.set(uid, []);
+      map.get(uid).push(e);
     }
-    return Object.entries(map)
-      .map(([uid, hrs]) => ({ uid, hrs: Math.round(hrs * 100) / 100 }))
-      .sort((a, b) => b.hrs - a.hrs);
+    // sort each user's entries by start/createdAt ascending
+    for (const [uid, arr] of map) {
+      arr.sort((a, b) => {
+        const as = a.start?.toDate?.() || a.createdAt?.toDate?.() || new Date(0);
+        const bs = b.start?.toDate?.() || b.createdAt?.toDate?.() || new Date(0);
+        return as - bs;
+      });
+    }
+    return Array.from(map.entries());
   }, [timeEntries]);
+
+  const userTotal = useCallback((uid) => {
+    return round2((timeEntries || []).filter(e => (e.userId || 'unknown') === uid)
+      .reduce((s, e) => s + (Number(e.hours) || 0), 0));
+  }, [timeEntries]);
+
+  const fmtElapsed = (ms) => {
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  };
 
   if (!jobId) return <Box p={2}><Typography color="error">Invalid job id.</Typography></Box>;
   if (loading) return <Box p={2}><Typography>Loading…</Typography></Box>;
@@ -258,7 +338,7 @@ export default function JobDetailPage() {
   const jsDate = toJSDate(job.installDate);
 
   return (
-    <Box sx={{ p: 2, maxWidth: 1000, mx: 'auto' }}>
+    <Box sx={{ p: 2, maxWidth: 1100, mx: 'auto' }}>
       <BusyOverlay open={busy} text="Working… uploading files" />
 
       {/* Image preview dialog */}
@@ -275,6 +355,22 @@ export default function JobDetailPage() {
             </Box>
           )}
         </DialogContent>
+      </Dialog>
+
+      {/* Signature dialog */}
+      <Dialog open={sigDialogOpen} onClose={closeSignatureDialog}>
+        <DialogTitle>Client Signature</DialogTitle>
+        <DialogContent>
+          <SignatureCanvas
+            penColor="black"
+            canvasProps={{ width: 360, height: 160, style: { border: '1px solid #ccc', background: '#fff' } }}
+            ref={(r) => setSigPad(r)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeSignatureDialog}>Cancel</Button>
+          <Button variant="contained" onClick={saveSignature}>Save</Button>
+        </DialogActions>
       </Dialog>
 
       {/* Header / summary */}
@@ -329,7 +425,7 @@ export default function JobDetailPage() {
             referencePhotos.map((p) => (
               <Grid item key={p.id}>
                 <Box
-                  sx={{ position: 'relative', width: 120, height: 90, cursor: 'zoom-in' }}
+                  sx={{ position: 'relative', width: 140, height: 100, cursor: 'zoom-in' }}
                   onClick={() => openPreview(p.url)}
                 >
                   <img
@@ -348,7 +444,7 @@ export default function JobDetailPage() {
         </Grid>
       </Paper>
 
-      {/* Plans (PDF or images, view only) */}
+      {/* Plans */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <PictureAsPdfRoundedIcon fontSize="small" /> Plans
@@ -365,7 +461,7 @@ export default function JobDetailPage() {
                 return (
                   <Box
                     key={pl.id}
-                    sx={{ width: 140, height: 100, cursor: 'zoom-in' }}
+                    sx={{ width: 160, height: 110, cursor: 'zoom-in' }}
                     onClick={() => openPreview(url)}
                     title={name}
                   >
@@ -400,7 +496,7 @@ export default function JobDetailPage() {
         </Box>
       </Paper>
 
-      {/* Completed Photos (with enlarge + delete) */}
+      {/* Completed Photos */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6">Completed Photos</Typography>
         <Button variant="outlined" component="label" sx={{ mt: 1 }}>
@@ -411,7 +507,7 @@ export default function JobDetailPage() {
         <Grid container spacing={1} mt={1}>
           {completedPhotos.map((p) => (
             <Grid item key={p.id}>
-              <Box sx={{ position: 'relative', width: 120, height: 90 }}>
+              <Box sx={{ position: 'relative', width: 140, height: 100 }}>
                 <img
                   src={p.url}
                   alt="completed"
@@ -450,7 +546,7 @@ export default function JobDetailPage() {
         </Button>
       </Paper>
 
-      {/* Signature */}
+      {/* Signature (preview + open dialog) */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6">Client Signature</Typography>
         {signatureURL ? (
@@ -462,53 +558,79 @@ export default function JobDetailPage() {
             />
           </Link>
         ) : (
-          <Box>
-            <SignatureCanvas
-              penColor="black"
-              canvasProps={{ width: 320, height: 140, style: { border: '1px solid #ccc' } }}
-              ref={(r) => setSigPad(r)}
-            />
-            <Button sx={{ mt: 1 }} variant="outlined" onClick={saveSignature}>Save Signature</Button>
-          </Box>
+          <Button sx={{ mt: 1 }} variant="outlined" onClick={openSignatureDialog}>Capture Signature</Button>
         )}
       </Paper>
 
       {/* Time Tracking */}
       <Paper sx={{ p: 2, mb: 2 }}>
-        <Typography variant="h6">Time Tracking</Typography>
-        <Typography><strong>Total Hours:</strong> {totalHours.toFixed(2)} hrs</Typography>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+          <Typography variant="h6">Time Tracking</Typography>
+          <Typography><strong>Total Hours:</strong> {totalHours.toFixed(2)} hrs</Typography>
+        </Stack>
+
         {Number.isFinite(Number(job.allowedHours)) && (
-          <Typography sx={{ color: totalHours <= Number(job.allowedHours) ? 'green' : 'red' }}>
+          <Typography sx={{ color: totalHours <= Number(job.allowedHours) ? 'green' : 'red', mb: 1 }}>
             <strong>Quoted Hours:</strong> {Number(job.allowedHours)}
           </Typography>
         )}
 
-        {hoursByUser.length > 0 && (
-          <Box sx={{ mt: 1 }}>
-            {hoursByUser.map(({ uid, hrs }) => (
-              <Chip
-                key={uid}
-                label={`${userMap?.[uid]?.shortName || userMap?.[uid]?.displayName || uid}: ${hrs} hrs`}
-                sx={{ mr: 1, mb: 1 }}
-              />
-            ))}
-          </Box>
-        )}
+        {/* Per-user grouped list with readable entries */}
+        <Box sx={{ display: 'grid', gap: 1.25 }}>
+          {entriesByUser.length ? entriesByUser.map(([uid, entries]) => {
+            const name = userMap?.[uid]?.shortName || userMap?.[uid]?.displayName || userMap?.[uid]?.email || uid;
+            const subtotal = userTotal(uid).toFixed(2);
+            return (
+              <Paper key={uid} variant="outlined" sx={{ p: 1.25, bgcolor: 'rgba(255,255,255,0.02)' }}>
+                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+                  <Chip label={`${name}`} />
+                  <Chip size="small" color="primary" variant="outlined" label={`${subtotal} hrs`} />
+                </Stack>
+                <Box sx={{ display: 'grid', gap: 0.5 }}>
+                  {entries.map((e) => {
+                    const start = e.start?.toDate?.() || null;
+                    const end = e.end?.toDate?.() || null;
+                    const created = e.createdAt?.toDate?.() || null;
+                    const dateRef = start || created;
+                    const dateStr = dateRef ? fmtDate(dateRef) : '—';
+                    const rangeStr = start || end
+                      ? `${fmtTimeHM(start)} → ${fmtTimeHM(end)}`
+                      : created ? `Logged: ${fmtTimeHM(created)}` : '—';
+                    const hrs = round2(e.hours || 0);
+                    const type = (e.source || (e.start ? 'timer' : 'manual')).toUpperCase();
+                    return (
+                      <Box key={e.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                        <Chip size="small" label={dateStr} />
+                        <Typography variant="body2" sx={{ opacity: 0.85 }}>{rangeStr}</Typography>
+                        <Chip size="small" variant="outlined" label={`${hrs} h`} />
+                        <Chip size="small" variant="outlined" label={type} />
+                      </Box>
+                    );
+                  })}
+                </Box>
+              </Paper>
+            );
+          }) : (
+            <Typography color="text.secondary">No time entries yet.</Typography>
+          )}
+        </Box>
 
-        <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
+        {/* Add hours + timer controls */}
+        <Box sx={{ display: 'flex', gap: 1, mt: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
           <TextField
             type="number" inputProps={{ step: '0.1', min: '0' }}
             placeholder="Add hours" value={newHours}
             onChange={(e) => setNewHours(e.target.value)} sx={{ width: 160 }}
           />
           <Button variant="outlined" onClick={addHours}>Submit</Button>
-        </Box>
 
-        <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
           {!timerRunning ? (
             <Button variant="contained" onClick={startTimer}>Start Timer</Button>
           ) : (
-            <Button variant="outlined" color="error" onClick={stopTimer}>Stop Timer</Button>
+            <>
+              <Button variant="outlined" color="error" onClick={stopTimer}>Stop Timer</Button>
+              <Chip label={`Running: ${fmtElapsed(elapsed)}`} />
+            </>
           )}
         </Box>
       </Paper>

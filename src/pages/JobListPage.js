@@ -11,13 +11,16 @@ import {
   Typography,
   Switch,
   Stack,
+  Tooltip,
 } from "@mui/material";
 import PhotoCameraRoundedIcon from "@mui/icons-material/PhotoCameraRounded";
 import AccessTimeRoundedIcon from "@mui/icons-material/AccessTimeRounded";
+import TimerOutlinedIcon from "@mui/icons-material/TimerOutlined";
 import { useHistory } from "react-router-dom";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { db } from "../firebase/firebase";
 import { useAuth } from "../contexts/AuthContext";
+import useActiveTimers from "../hooks/useActiveTimers";
 
 function IconBadge({ icon, label, bg = "#1976d2" }) {
   return (
@@ -102,6 +105,10 @@ export default function JobListPage() {
     return [...upcoming, ...completed];
   }, [jobs, tab, showCompleted]);
 
+  // Live per-user timers
+  const jobIds = useMemo(() => filtered.map((j) => j.id), [filtered]);
+  const { byJob: timersByJob } = useActiveTimers(jobIds);
+
   const groups = useMemo(() => {
     const map = new Map();
     for (const j of filtered) {
@@ -122,7 +129,16 @@ export default function JobListPage() {
 
   if (loading) {
     return (
-      <Box sx={{ p: 4, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+      <Box
+        sx={{
+          p: 4,
+          color: "#fff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 2,
+        }}
+      >
         <CircularProgress sx={{ color: "#fff" }} />
         <Typography>Loading jobs…</Typography>
       </Box>
@@ -178,11 +194,14 @@ export default function JobListPage() {
                   : "—";
 
               const photos = Number(
-   j.completedPhotoCount ??
-   (Array.isArray(j.completedPhotos) ? j.completedPhotos.length : 0) ??
-   0
-);
+                j.completedPhotoCount ??
+                  (Array.isArray(j.completedPhotos) ? j.completedPhotos.length : 0) ??
+                  0
+              );
               const hours = Number(j.hoursTotal || 0);
+
+              const runningList = timersByJob[j.id] || []; // [{ userId, userShortName?, start, formatted }]
+              const hasRunning = runningList.length > 0;
 
               return (
                 <Paper
@@ -207,7 +226,13 @@ export default function JobListPage() {
                       <img
                         src={j.companyLogoUrl}
                         alt="logo"
-                        style={{ height: 48, width: 48, objectFit: "contain", borderRadius: 8, backgroundColor: "rgba(255, 255, 255, 1)" }}
+                        style={{
+                          height: 48,
+                          width: 48,
+                          objectFit: "contain",
+                          borderRadius: 8,
+                          backgroundColor: "rgba(255, 255, 255, 1)",
+                        }}
                       />
                     )}
                     <Box sx={{ minWidth: 0 }}>
@@ -217,25 +242,69 @@ export default function JobListPage() {
                       <Typography variant="body2" sx={{ opacity: 0.85 }}>
                         Assigned: {assigned}
                       </Typography>
-                      {timeStr && (
-                        <Chip
-                          size="small"
-                          label={timeStr}
-                          sx={{
-                            mt: 0.75,
-                            bgcolor: "rgba(255,193,7,0.15)",
-                            color: "#ffc107",
-                            fontWeight: 800,
-                          }}
-                        />
-                      )}
+
+                      <Stack direction="row" spacing={1} sx={{ mt: 0.75, flexWrap: "wrap" }}>
+                        {timeStr && (
+                          <Chip
+                            size="small"
+                            label={timeStr}
+                            sx={{
+                              bgcolor: "rgba(255,193,7,0.15)",
+                              color: "#ffc107",
+                              fontWeight: 800,
+                            }}
+                          />
+                        )}
+
+                        {/* One live chip per user running a timer */}
+                        {hasRunning &&
+                          runningList.map((e) => {
+                            const name =
+                              e.userShortName ||
+                              userMap?.[e.userId]?.shortName ||
+                              userMap?.[e.userId]?.displayName ||
+                              userMap?.[e.userId]?.email ||
+                              e.userId;
+                            return (
+                              <Tooltip
+                                key={`${j.id}-${e.userId}`}
+                                title={`Started ${e.start.toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}`}
+                              >
+                                <Chip
+                                  size="small"
+                                  icon={<TimerOutlinedIcon fontSize="small" />}
+                                  label={`${name} — ${e.formatted}`}
+                                  sx={{
+                                    bgcolor: "rgba(33,150,243,0.2)",
+                                    color: "#90caf9",
+                                    border: "1px solid rgba(33,150,243,0.4)",
+                                    fontWeight: 800,
+                                    cursor: "help",
+                                  }}
+                                  onClick={(ev) => ev.stopPropagation()}
+                                />
+                              </Tooltip>
+                            );
+                          })}
+                      </Stack>
                     </Box>
                   </Box>
 
                   <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                      <IconBadge icon={<PhotoCameraRoundedIcon fontSize="small" />} label={photos} bg="#1976d2" />
-                      <IconBadge icon={<AccessTimeRoundedIcon fontSize="small" />} label={hours.toFixed(2)} bg="#7e57c2" />
+                      <IconBadge
+                        icon={<PhotoCameraRoundedIcon fontSize="small" />}
+                        label={photos}
+                        bg="#1976d2"
+                      />
+                      <IconBadge
+                        icon={<AccessTimeRoundedIcon fontSize="small" />}
+                        label={hours.toFixed(2)}
+                        bg="#7e57c2"
+                      />
                     </Box>
                     {Number.isFinite(Number(j.allowedHours)) && (
                       <Chip

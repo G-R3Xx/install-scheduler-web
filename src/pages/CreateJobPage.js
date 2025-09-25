@@ -1,4 +1,3 @@
-// src/pages/CreateJobPage.js
 import React, { useMemo, useState } from 'react';
 import {
   Box,
@@ -17,7 +16,7 @@ import {
   Link,
 } from '@mui/material';
 import { useHistory } from 'react-router-dom';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, Timestamp, doc, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../firebase/firebase';
 import { useAuth } from '../contexts/AuthContext';
@@ -87,9 +86,19 @@ export default function CreateJobPage() {
 
   const clearAssigned = () => setAssignedTo([]);
 
+  const toTimestamp = (dStr, tStr) => {
+    if (!dStr) return null;
+    // combine date + (optional) time into a single Date -> Timestamp
+    const iso = `${dStr}T${tStr || '00:00'}:00`;
+    const dt = new Date(iso);
+    return Number.isFinite(dt.getTime()) ? Timestamp.fromDate(dt) : null;
+  };
+
   const handleCreate = async () => {
     try {
       setSaving(true);
+
+      const installTs = toTimestamp(installDate, installTime);
 
       const payload = {
         clientName: clientName || '',
@@ -100,9 +109,9 @@ export default function CreateJobPage() {
         address: address || '',
         description: description || '',
         allowedHours: allowedHours ? Number(allowedHours) : null,
-        installTime: installTime || null,
-        installDate: installDate || null,
-        assignedTo, // <- array of userIds from chips
+        installTime: installTime || null,       // still keep the raw time string if you want it elsewhere
+        installDate: installTs,                 // **Timestamp with time baked in** so time chip works
+        assignedTo,                             // array of userIds
         status: isSurveyRequest ? 'survey-request' : 'in progress',
         isSurveyRequest,
         createdAt: serverTimestamp(),
@@ -110,11 +119,12 @@ export default function CreateJobPage() {
         createdBy: currentUser?.uid || null,
         hoursTotal: 0,
         completedPhotoCount: 0,
+        companyLogoUrl: null,                   // will set after upload (if any)
       };
 
       const jobRef = await addDoc(collection(db, 'jobs'), payload);
 
-      // Upload assets after doc creation
+      // Upload assets after doc creation (and write companyLogoUrl to job doc)
       try {
         setUploadingAssets(true);
 
@@ -122,11 +132,10 @@ export default function CreateJobPage() {
           const r = ref(storage, `jobs/${jobRef.id}/logo_${Date.now()}_${logoFile.name}`);
           await uploadBytes(r, logoFile);
           const logoUrl = await getDownloadURL(r);
-          await addDoc(collection(db, 'jobs', jobRef.id, 'assets'), {
-            type: 'logo',
-            url: logoUrl,
-            fileName: logoFile.name,
-            createdAt: serverTimestamp(),
+          // persist on job so it shows immediately on detail & list
+          await updateDoc(doc(db, 'jobs', jobRef.id), {
+            companyLogoUrl: logoUrl,
+            updatedAt: serverTimestamp(),
           });
         }
 
