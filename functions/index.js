@@ -1,22 +1,30 @@
 // functions/index.js
+
 const { onDocumentUpdated, onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { defineSecret } = require('firebase-functions/params');
 const admin = require('firebase-admin');
-const sgMail = require('@sendgrid/mail');
+const nodemailer = require('nodemailer');
 const { Storage } = require('@google-cloud/storage');
 
 try { admin.app(); } catch { admin.initializeApp(); }
 const db = admin.firestore();
 const storage = new Storage();
 
-const SENDGRID_API_KEY = defineSecret('SENDGRID_API_KEY');
+const region = 'australia-southeast1';
 
+// === Secrets ===
+const GMAIL_USER = defineSecret('GMAIL_USER');                 // e.g. installscheduler@tenderedge.com.au
+const GMAIL_APP_PASSWORD = defineSecret('GMAIL_APP_PASSWORD'); // 16-char app password
+const MGMT_EMAIL = defineSecret('MGMT_EMAIL');                 // e.g. printroom@tenderedge.com.au (comma-separated OK)
+const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY');           // for the HTTPS test endpoint
+
+// ------------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------------
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-/**
- * Compute hours from entry (manual hours or start/end)
- */
+/** Compute hours from entry (manual hours or start/end). */
 function hoursFromEntry(d) {
   if (typeof d.hours === 'number' && Number.isFinite(d.hours)) return d.hours;
 
@@ -30,14 +38,13 @@ function hoursFromEntry(d) {
   return (end.getTime() - start.getTime()) / 3600000;
 }
 
-/**
- * Parse GCS URL
- */
+/** Parse bucket/path from a Firebase download URL or gs:// URL. */
 function parseGsFromDownloadUrl(urlString) {
   try {
     const u = new URL(urlString);
     if (u.hostname.includes('firebasestorage.googleapis.com')) {
       const parts = u.pathname.split('/');
+      // format: /v0/b/<bucket>/o/<encodedPath>
       const bucket = parts[4];
       const encoded = parts[6] || '';
       const path = decodeURIComponent(encoded);
@@ -53,9 +60,7 @@ function parseGsFromDownloadUrl(urlString) {
   return null;
 }
 
-/**
- * Download file from GCS for attachments
- */
+/** Download a GCS object and return base64/mime/meta (useful if you later decide to attach files). */
 async function downloadAsBase64({ bucket, path, filenameHint }) {
   try {
     const file = storage.bucket(bucket).file(path);
@@ -72,11 +77,11 @@ async function downloadAsBase64({ bucket, path, filenameHint }) {
   }
 }
 
-// ----------------------------------------
-// HOURS RECALC: runs on any timeEntries write
-// ----------------------------------------
+// ------------------------------------------------------------------
+// HOURS RECALC: runs on any timeEntries write (unchanged)
+// ------------------------------------------------------------------
 exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
-  { document: 'jobs/{jobId}/timeEntries/{entryId}' },
+  { region, document: 'jobs/{jobId}/timeEntries/{entryId}' },
   async (event) => {
     const { jobId } = event.params;
     const entriesSnap = await db.collection('jobs').doc(jobId).collection('timeEntries').get();
@@ -91,38 +96,33 @@ exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
   }
 );
 
-// ----------------------------------------
-// EMAIL ON COMPLETION
-// ----------------------------------------
+// ------------------------------------------------------------------
+// EMAIL ON COMPLETION — Gmail (SMTP + App Password)
+// Fires only when status transitions TO "completed"
+// ------------------------------------------------------------------
 exports.sendCompletionEmail = onDocumentUpdated(
-  { document: 'jobs/{jobId}', secrets: [SENDGRID_API_KEY] },
+  { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
   async (event) => {
     const before = event.data?.before?.data() || {};
-    const after = event.data?.after?.data() || {};
-    const jobId = event.params.jobId;
+    const after  = event.data?.after?.data()  || {};
+    const jobId  = event.params.jobId;
 
     const wasCompleted = String(before.status || '').toLowerCase() === 'completed';
-    const nowCompleted = String(after.status || '').toLowerCase() === 'completed';
-    if (wasCompleted || !nowCompleted) return;
-
-    sgMail.setApiKey(SENDGRID_API_KEY.value());
+    const nowCompleted = String(after.status  || '').toLowerCase() === 'completed';
+    if (wasCompleted || !nowCompleted) return; // Only on the transition TO completed
 
     const job = after;
     const client = job.clientName || 'Unknown Client';
 
-    // --- User map
+    // Build user map
     const usersSnap = await db.collection('users').get();
     const userMap = {};
     usersSnap.forEach((d) => {
       const u = d.data() || {};
-      userMap[d.id] = {
-        shortName: u.shortName,
-        displayName: u.displayName,
-        email: u.email,
-      };
+      userMap[d.id] = { shortName: u.shortName, displayName: u.displayName, email: u.email };
     });
 
-    // --- Time entries
+    // Time entries table
     const timeEntriesSnap = await db.collection(`jobs/${jobId}/timeEntries`).get();
     const timeEntries = timeEntriesSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
     let total = 0;
@@ -134,61 +134,54 @@ exports.sendCompletionEmail = onDocumentUpdated(
         userMap[e.userId]?.displayName ||
         userMap[e.userId]?.email ||
         e.userId;
-      const when = e.createdAt?.toDate?.()?.toLocaleString() || '—';
+      const when = e.createdAt?.toDate?.()?.toLocaleString('en-AU', { timeZone: 'Australia/Sydney' }) || '—';
       return `<tr><td>${user}</td><td>${hrs}</td><td>${when}</td></tr>`;
     });
     const totalRounded = round2(total);
 
-    // --- Photos
+    // Completed photos (expects docs in jobs/{jobId}/completedPhotos with {url})
     const completedSnap = await db.collection(`jobs/${jobId}/completedPhotos`).get();
     const photos = completedSnap.docs.map((d) => d.data());
     const photoHtml = photos.length
-      ? photos
-          .map(
-            (p) => `
-          <a href="${p.url}" target="_blank">
-            <img src="${p.url}" style="width:120px; height:auto; border:1px solid #ccc; border-radius:4px; margin:4px;" />
-          </a>`
-          )
-          .join('')
+      ? photos.map((p) => `
+          <a href="${p.url}" target="_blank" rel="noopener">
+            <img src="${p.url}" style="width:120px;height:auto;border:1px solid #ccc;border-radius:4px;margin:4px;" />
+          </a>`).join('')
       : `<p style="color:#888;">No completed photos.</p>`;
 
-    // --- Signature
+    // Signature (URL stored on job doc as signatureURL)
     const signatureHtml = job.signatureURL
-      ? `<a href="${job.signatureURL}" target="_blank">
-           <img src="${job.signatureURL}" style="max-width:300px; border:1px solid #ccc; border-radius:4px;" />
+      ? `<a href="${job.signatureURL}" target="_blank" rel="noopener">
+           <img src="${job.signatureURL}" style="max-width:300px;border:1px solid #ccc;border-radius:4px;" />
          </a>`
       : '';
 
-    // --- Assigned names
+    // Assigned names
     const assignedNames = Array.isArray(job.assignedTo)
-      ? job.assignedTo.map(
-          (uid) =>
-            userMap[uid]?.shortName ||
-            userMap[uid]?.displayName ||
-            userMap[uid]?.email ||
-            uid
+      ? job.assignedTo.map(uid =>
+          userMap[uid]?.shortName || userMap[uid]?.displayName || userMap[uid]?.email || uid
         ).join(', ')
       : '—';
 
-    // --- Build HTML
+    // Date/time
     const installDate = job.installDate?.toDate?.() || null;
     const dateStr = installDate
-      ? installDate.toLocaleDateString(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' })
+      ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
       : '—';
     const timeStr = installDate && job.installTime
-      ? installDate.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      ? installDate.toLocaleTimeString('en-AU', { timeZone: 'Australia/Sydney', hour: 'numeric', minute: '2-digit' })
       : '';
 
+    // Notes (basic HTML escape + newlines to <br/>)
     const notesHtml = (job.installerNotes || '—')
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
 
     const html = `
-      <div style="font-family: system-ui, Arial, sans-serif; line-height:1.5; color:#333;">
-        <h2 style="color:#2e7d32;">✅ Job Completed</h2>
+      <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#333;">
+        <h2 style="color:#2e7d32;margin:0 0 12px;">✅ Job Completed</h2>
 
-        <table cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:14px; margin-bottom:16px;">
+        <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-size:14px;margin-bottom:16px;">
           <tr style="background:#f5f5f5;"><td><strong>Client</strong></td><td>${client}</td></tr>
           <tr><td><strong>Company</strong></td><td>${job.company || ''}</td></tr>
           <tr style="background:#f5f5f5;"><td><strong>Address</strong></td><td>${job.address || ''}</td></tr>
@@ -196,13 +189,13 @@ exports.sendCompletionEmail = onDocumentUpdated(
           <tr style="background:#f5f5f5;"><td><strong>Assigned To</strong></td><td>${assignedNames}</td></tr>
         </table>
 
-        <h3>Installer Notes</h3>
-        <div style="background:#fafafa; border:1px solid #ddd; padding:10px; border-radius:4px;">
+        <h3 style="margin:16px 0 8px;">Installer Notes</h3>
+        <div style="background:#fafafa;border:1px solid #ddd;padding:10px;border-radius:4px;">
           ${notesHtml}
         </div>
 
-        <h3>Hours</h3>
-        <table cellpadding="6" cellspacing="0" style="border-collapse:collapse; width:100%; font-size:13px; border:1px solid #eee; margin-bottom:16px;">
+        <h3 style="margin:16px 0 8px;">Hours</h3>
+        <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-size:13px;border:1px solid #eee;margin-bottom:16px;">
           <thead>
             <tr style="background:#efefef;">
               <th align="left">User</th>
@@ -212,40 +205,79 @@ exports.sendCompletionEmail = onDocumentUpdated(
           </thead>
           <tbody>
             ${rows.join('')}
-            <tr style="background:#f5f5f5; font-weight:600;">
+            <tr style="background:#f5f5f5;font-weight:600;">
               <td>Total</td><td>${totalRounded}</td><td></td>
             </tr>
           </tbody>
         </table>
 
-        <h3>Completed Photos</h3>
-        <div style="display:flex; flex-wrap:wrap; gap:8px;">${photoHtml}</div>
+        <h3 style="margin:16px 0 8px;">Completed Photos</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">${photoHtml}</div>
 
-        ${signatureHtml ? `<h3 style="margin-top:16px;">Signature</h3>${signatureHtml}` : ''}
+        ${signatureHtml ? `<h3 style="margin:16px 0 8px;">Signature</h3>${signatureHtml}` : ''}
       </div>
     `;
 
-    const msg = {
-      to: 'printroom@tenderedge.com.au',
-      from: 'printroom@tenderedge.com.au',
-      subject: `Job Completed — ${client}`,
-      html,
-      trackingSettings: { clickTracking: { enable: false, enable_text: false } },
-    };
+    // Gmail transport (SMTP + App Password)
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
+    });
+
+    // Recipients: MGMT_EMAIL (comma-separated OK). Use Reply-To for job contact if present.
+    const toList = (MGMT_EMAIL.value() || '').split(',').map(s => s.trim()).filter(Boolean);
+    const replyTo = (job.email && String(job.email).includes('@'))
+      ? `${job.contactName || job.clientName || 'Client'} <${job.email}>`
+      : `"Install Scheduler" <${GMAIL_USER.value()}>`;
 
     try {
-      await sgMail.send(msg);
-      console.log(`Completion email sent for job ${jobId}`);
+      const info = await transporter.sendMail({
+        from: `"Install Scheduler" <${GMAIL_USER.value()}>`,   // keep From = authenticated mailbox
+        to: toList,
+        replyTo,
+        subject: `Job Completed — ${client}${job.jobNumber ? ` [${job.jobNumber}]` : ''}`,
+        html,
+        text: `Job Completed — ${client}\n\n(HTML version includes details, hours, photos and signature.)`,
+      });
+      console.log(`Completion email sent for job ${jobId}`, info.messageId);
     } catch (err) {
-      console.error('SendGrid send failed:', err?.response?.body || err.message || err);
+      console.error('Gmail send failed:', err?.response || err?.message || err);
       throw err;
     }
   }
 );
 
-// ----------------------------------------
-// Optional one-off repair (kept as before)
-// ----------------------------------------
+// ------------------------------------------------------------------
+// HTTPS test endpoint — quick way to verify SMTP + secrets
+// ------------------------------------------------------------------
+exports.sendTestEmail = onRequest(
+  { region, secrets: [MAIL_TEST_KEY, GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
+  async (req, res) => {
+    if (req.query.key !== MAIL_TEST_KEY.value()) return res.status(401).send('Unauthorized');
+
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
+    });
+
+    const info = await transporter.sendMail({
+      from: `"Install Scheduler" <${GMAIL_USER.value()}>`,
+      to: (req.query.to || MGMT_EMAIL.value()),
+      subject: 'Test: Install Scheduler mail pipeline',
+      text: 'This is a test from Cloud Functions via Gmail SMTP.',
+    });
+
+    res.status(200).send(`Sent: ${info.messageId}`);
+  }
+);
+
+// ------------------------------------------------------------------
+// Optional one-off repair endpoint (kept as a stub)
+// ------------------------------------------------------------------
 exports.repairDownloadUrls = onRequest(async (req, res) => {
   res.send({ ok: true, message: 'Not changed in this snippet' });
 });
