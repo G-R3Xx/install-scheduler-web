@@ -8,16 +8,16 @@ const nodemailer = require('nodemailer');
 const { Storage } = require('@google-cloud/storage');
 
 try { admin.app(); } catch { admin.initializeApp(); }
+
 const db = admin.firestore();
 const storage = new Storage();
-
 const region = 'australia-southeast1';
 
 // === Secrets ===
 const GMAIL_USER = defineSecret('GMAIL_USER');                 // e.g. installscheduler@tenderedge.com.au
 const GMAIL_APP_PASSWORD = defineSecret('GMAIL_APP_PASSWORD'); // 16-char app password
 const MGMT_EMAIL = defineSecret('MGMT_EMAIL');                 // e.g. printroom@tenderedge.com.au (comma-separated OK)
-const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY');           // for the HTTPS test endpoint
+const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY');           // for sendTestEmail endpoint
 
 // ------------------------------------------------------------------
 // Helpers
@@ -60,7 +60,7 @@ function parseGsFromDownloadUrl(urlString) {
   return null;
 }
 
-/** Download a GCS object and return base64/mime/meta (useful if you later decide to attach files). */
+/** Download a GCS object and return base64/mime/meta (if you later want attachments). */
 async function downloadAsBase64({ bucket, path, filenameHint }) {
   try {
     const file = storage.bucket(bucket).file(path);
@@ -78,7 +78,7 @@ async function downloadAsBase64({ bucket, path, filenameHint }) {
 }
 
 // ------------------------------------------------------------------
-// HOURS RECALC: runs on any timeEntries write (unchanged)
+// HOURS RECALC: runs on any timeEntries write
 // ------------------------------------------------------------------
 exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
   { region, document: 'jobs/{jobId}/timeEntries/{entryId}' },
@@ -98,7 +98,7 @@ exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
 
 // ------------------------------------------------------------------
 // EMAIL ON COMPLETION — Gmail (SMTP + App Password)
-// Fires only when status transitions TO "completed" (unchanged)
+// Fires only when status transitions TO "completed"
 // ------------------------------------------------------------------
 exports.sendCompletionEmail = onDocumentUpdated(
   { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
@@ -169,7 +169,11 @@ exports.sendCompletionEmail = onDocumentUpdated(
       ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
       : '—';
     const timeStr = installDate && job.installTime
-      ? installDate.toLocaleTimeString('en-AU', { timeZone: 'Australia/Sydney', hour: 'numeric', minute: '2-digit' })
+      ? installDate.toLocaleTimeString('en-AU', {
+          timeZone: 'Australia/Sydney',
+          hour: 'numeric',
+          minute: '2-digit'
+        })
       : '';
 
     // Notes (basic HTML escape + newlines to <br/>)
@@ -254,9 +258,15 @@ exports.sendCompletionEmail = onDocumentUpdated(
 // Manual trigger from Job Detail – sends to job.email
 // ------------------------------------------------------------------
 exports.sendClientCompletionEmail = onRequest(
-  { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
+  { region, cors: true, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
   async (req, res) => {
     try {
+      if (req.method === 'OPTIONS') {
+        // CORS preflight
+        res.status(204).send('');
+        return;
+      }
+
       if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
         return;
@@ -281,9 +291,9 @@ exports.sendClientCompletionEmail = onRequest(
         return;
       }
 
-      const clientName = job.clientName || job.contactName || 'Valued client';
+      const clientName = job.clientName || job.contact || 'Valued client';
 
-      // Completed photos (same pattern as management email)
+      // Completed photos
       const completedSnap = await jobRef.collection('completedPhotos').get();
       const photos = completedSnap.docs.map((d) => d.data());
       const photosHtml = photos.length
@@ -306,7 +316,7 @@ exports.sendClientCompletionEmail = onRequest(
         ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
         : '';
 
-      // Notes – light cleanup
+      // Clean up installer notes for HTML
       const notesHtml = (job.installerNotes || '')
         .replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
@@ -388,7 +398,6 @@ exports.sendClientCompletionEmail = onRequest(
 
       console.log(`Client completion email sent for job ${jobId}`, info.messageId);
 
-      // Record that we sent a client email
       await jobRef.update({
         clientEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
       });
@@ -402,7 +411,7 @@ exports.sendClientCompletionEmail = onRequest(
 );
 
 // ------------------------------------------------------------------
-// HTTPS test endpoint — quick way to verify SMTP + secrets (unchanged)
+// HTTPS test endpoint — quick way to verify SMTP + secrets
 // ------------------------------------------------------------------
 exports.sendTestEmail = onRequest(
   { region, secrets: [MAIL_TEST_KEY, GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
@@ -428,7 +437,7 @@ exports.sendTestEmail = onRequest(
 );
 
 // ------------------------------------------------------------------
-// Optional one-off repair endpoint (kept as a stub) (unchanged)
+// Optional one-off repair endpoint (stub)
 // ------------------------------------------------------------------
 exports.repairDownloadUrls = onRequest(async (req, res) => {
   res.send({ ok: true, message: 'Not changed in this snippet' });

@@ -81,6 +81,10 @@ export default function JobDetailPage() {
   // Image preview dialog
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Client email state
+  const [sendingClientEmail, setSendingClientEmail] = useState(false);
+
   const openPreview = (url) => { setPreviewUrl(url); setPreviewOpen(true); };
   const closePreview = () => { setPreviewOpen(false); setPreviewUrl(''); };
 
@@ -151,7 +155,6 @@ export default function JobDetailPage() {
       for (const f of arr) {
         const r = ref(storage, `jobs/${jobId}/completed/${Date.now()}_${f.name}`);
         await uploadBytes(r, f);
-        // ✅ Always store the FULL download URL (with token)
         const url = await getDownloadURL(r);
         await addDoc(collection(db, 'jobs', jobId, 'completedPhotos'), { url, createdAt: serverTimestamp() });
       }
@@ -169,7 +172,9 @@ export default function JobDetailPage() {
         const u = new URL(item.url);
         const path = decodeURIComponent(u.pathname.replace(/^\/v0\/b\/[^/]+\/o\//, ''));
         await deleteObject(ref(storage, path));
-      } catch { /* ignore parse errors */ }
+      } catch {
+        // ignore parse errors
+      }
       await deleteDoc(doc(db, 'jobs', jobId, 'completedPhotos', item.id));
       await loadAll();
     } finally {
@@ -268,6 +273,7 @@ export default function JobDetailPage() {
     });
     history.push('/');
   };
+
   const reopenJob = async () => {
     await updateDoc(doc(db, 'jobs', jobId), { status: 'in progress', updatedAt: serverTimestamp() });
     loadAll();
@@ -291,6 +297,46 @@ export default function JobDetailPage() {
       closeSignatureDialog();
     } finally {
       setBusy(false);
+    }
+  };
+
+  // ---- Client email handler
+  const handleSendClientEmail = async () => {
+    if (!job || !job.id || !job.email) {
+      alert('Missing job or client email.');
+      return;
+    }
+
+    if (!window.confirm(`Send completion summary to ${job.email}?`)) {
+      return;
+    }
+
+    try {
+      setSendingClientEmail(true);
+
+      const res = await fetch(
+  'https://australia-southeast1-install-scheduler.cloudfunctions.net/sendClientCompletionEmail',
+  {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jobId: job.id }),
+  }
+);
+
+
+      if (!res.ok) {
+        const text = await res.text();
+        console.error('Client email failed:', text);
+        alert('Client email failed. Check console/logs.');
+        return;
+      }
+
+      alert('Client email sent ✅');
+    } catch (err) {
+      console.error(err);
+      alert('Client email failed. See console for details.');
+    } finally {
+      setSendingClientEmail(false);
     }
   };
 
@@ -394,7 +440,7 @@ export default function JobDetailPage() {
         <Typography><strong>Address:</strong> {job.address || '—'}</Typography>
 
         <Typography sx={{ mt: 1 }}><strong>Status:</strong> {job.status || '—'}</Typography>
-        <Typography sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Typography component="div" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <strong>Install Date:</strong> {fmtDate(jsDate)}
           {job.installTime && jsDate && (
             <Chip
@@ -651,6 +697,14 @@ export default function JobDetailPage() {
         ) : (
           <Button variant="outlined" color="success" onClick={completeJob}>Complete Job</Button>
         )}
+        <Button
+          variant="outlined"
+          color="primary"
+          disabled={sendingClientEmail || job.status !== 'completed' || !job.email}
+          onClick={handleSendClientEmail}
+        >
+          {sendingClientEmail ? 'Sending client email…' : 'Email client summary'}
+        </Button>
       </Box>
     </Box>
   );
