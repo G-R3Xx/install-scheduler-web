@@ -51,7 +51,9 @@ export default function JobListPage() {
     const load = async () => {
       setLoading(true);
       try {
-        const snap = await getDocs(query(collection(db, "jobs"), orderBy("installDate")));
+        const snap = await getDocs(
+          query(collection(db, "jobs"), orderBy("installDate"))
+        );
         const arr = [];
         snap.forEach((d) => arr.push({ id: d.id, ...(d.data() || {}) }));
         setJobs(arr);
@@ -64,8 +66,37 @@ export default function JobListPage() {
     load();
   }, []);
 
-  const toJSDate = (v) =>
-    v?.toDate?.() instanceof Date ? v.toDate() : v instanceof Date ? v : null;
+  // More robust date coercion: Timestamp | Date | string | number
+  const toJSDate = (v) => {
+    if (!v) return null;
+
+    // Firestore Timestamp (v9)
+    if (typeof v?.toDate === "function") {
+      const d = v.toDate();
+      return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+    }
+
+    if (v instanceof Date) {
+      return !Number.isNaN(v.getTime()) ? v : null;
+    }
+
+    if (typeof v === "string") {
+      // handle "YYYY-MM-DD"
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        const d = new Date(`${v}T00:00:00`);
+        return !Number.isNaN(d.getTime()) ? d : null;
+      }
+      const d = new Date(v);
+      return !Number.isNaN(d.getTime()) ? d : null;
+    }
+
+    if (typeof v === "number") {
+      const d = new Date(v);
+      return !Number.isNaN(d.getTime()) ? d : null;
+    }
+
+    return null;
+  };
 
   const isCompleted = (j) => {
     const status = String(j.status || "").toLowerCase();
@@ -77,18 +108,31 @@ export default function JobListPage() {
       const completed = isCompleted(j);
       if (!showCompleted && completed) return false;
 
+      const status = String(j.status || "").toLowerCase();
+      const jobType = String(j.jobType || "").toLowerCase();
+
+      const isSurveyJob =
+        Boolean(j.isSurvey) ||
+        jobType === "survey" ||
+        status === "survey";
+
+      const isSurveyRequest =
+        Boolean(j.isSurveyRequest) ||
+        Boolean(j.surveyRequest) ||
+        status === "survey-request";
+
       if (tab === 0) {
-        const isSurvey = Boolean(j.isSurvey);
-        const isSurveyReq = Boolean(j.surveyRequest);
-        return !isSurvey || isSurveyReq;
+        // Jobs tab: show normal jobs + survey-requests
+        return !isSurveyJob || isSurveyRequest;
       } else {
-        return Boolean(j.isSurvey);
+        // Surveys tab: actual surveys (not just survey-request installs)
+        return isSurveyJob && !isSurveyRequest;
       }
     });
 
     const upcoming = [];
-    const completed = [];
-    for (const j of list) (isCompleted(j) ? completed : upcoming).push(j);
+    const completedArr = [];
+    for (const j of list) (isCompleted(j) ? completedArr : upcoming).push(j);
 
     upcoming.sort((a, b) => {
       const da = toJSDate(a.installDate)?.getTime() || 0;
@@ -96,13 +140,19 @@ export default function JobListPage() {
       return da - db;
     });
 
-    completed.sort((a, b) => {
-      const da = toJSDate(a.completedAt)?.getTime() || toJSDate(a.installDate)?.getTime() || 0;
-      const db = toJSDate(b.completedAt)?.getTime() || toJSDate(b.installDate)?.getTime() || 0;
+    completedArr.sort((a, b) => {
+      const da =
+        toJSDate(a.completedAt)?.getTime() ||
+        toJSDate(a.installDate)?.getTime() ||
+        0;
+      const db =
+        toJSDate(b.completedAt)?.getTime() ||
+        toJSDate(b.installDate)?.getTime() ||
+        0;
       return db - da; // reverse (newest first)
     });
 
-    return [...upcoming, ...completed];
+    return [...upcoming, ...completedArr];
   }, [jobs, tab, showCompleted]);
 
   // Live per-user timers
@@ -114,7 +164,7 @@ export default function JobListPage() {
     for (const j of filtered) {
       const d = toJSDate(j.installDate);
       const label = d
-        ? d.toLocaleDateString(undefined, {
+        ? d.toLocaleDateString("en-AU", {
             weekday: "long",
             day: "2-digit",
             month: "2-digit",
@@ -124,7 +174,10 @@ export default function JobListPage() {
       if (!map.has(label)) map.set(label, []);
       map.get(label).push(j);
     }
-    return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
+    return Array.from(map.entries()).map(([label, items]) => ({
+      label,
+      items,
+    }));
   }, [filtered]);
 
   if (loading) {
@@ -148,15 +201,29 @@ export default function JobListPage() {
   return (
     <Box sx={{ p: { xs: 1.5, sm: 2, md: 3 } }}>
       {/* Top controls */}
-      <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", mb: 2 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          gap: 2,
+          flexWrap: "wrap",
+          mb: 2,
+        }}
+      >
         <Button variant="contained" onClick={() => history.push("/jobs/new")}>
           Add Job
         </Button>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} textColor="inherit">
+        <Tabs
+          value={tab}
+          onChange={(_, v) => setTab(v)}
+          textColor="inherit"
+        >
           <Tab label="Jobs" />
           <Tab label="Surveys" />
         </Tabs>
-        <Box sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}>
+        <Box
+          sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}
+        >
           <Switch
             checked={showCompleted}
             onChange={(e) => setShowCompleted(e.target.checked)}
@@ -169,7 +236,10 @@ export default function JobListPage() {
       {/* Groups */}
       {groups.map((g) => (
         <Box key={g.label} sx={{ mb: 3 }}>
-          <Typography variant="h5" sx={{ color: "#fff", mb: 1.5, fontWeight: 700 }}>
+          <Typography
+            variant="h5"
+            sx={{ color: "#fff", mb: 1.5, fontWeight: 700 }}
+          >
             {g.label}
           </Typography>
           <Stack spacing={1.25}>
@@ -177,7 +247,10 @@ export default function JobListPage() {
               const d = toJSDate(j.installDate);
               const timeStr =
                 j.installTime && d
-                  ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+                  ? d.toLocaleTimeString("en-AU", {
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })
                   : null;
 
               const assigned =
@@ -195,7 +268,9 @@ export default function JobListPage() {
 
               const photos = Number(
                 j.completedPhotoCount ??
-                  (Array.isArray(j.completedPhotos) ? j.completedPhotos.length : 0) ??
+                  (Array.isArray(j.completedPhotos)
+                    ? j.completedPhotos.length
+                    : 0) ??
                   0
               );
               const hours = Number(j.hoursTotal || 0);
@@ -221,7 +296,14 @@ export default function JobListPage() {
                     gap: 2,
                   }}
                 >
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 2, minWidth: 0 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 2,
+                      minWidth: 0,
+                    }}
+                  >
                     {j.companyLogoUrl && (
                       <img
                         src={j.companyLogoUrl}
@@ -236,14 +318,21 @@ export default function JobListPage() {
                       />
                     )}
                     <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 700 }}>
+                      <Typography
+                        variant="h6"
+                        sx={{ fontSize: 18, fontWeight: 700 }}
+                      >
                         {j.clientName || "Untitled"}
                       </Typography>
                       <Typography variant="body2" sx={{ opacity: 0.85 }}>
                         Assigned: {assigned}
                       </Typography>
 
-                      <Stack direction="row" spacing={1} sx={{ mt: 0.75, flexWrap: "wrap" }}>
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        sx={{ mt: 0.75, flexWrap: "wrap" }}
+                      >
                         {timeStr && (
                           <Chip
                             size="small"
@@ -268,10 +357,13 @@ export default function JobListPage() {
                             return (
                               <Tooltip
                                 key={`${j.id}-${e.userId}`}
-                                title={`Started ${e.start.toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })}`}
+                                title={`Started ${e.start.toLocaleTimeString(
+                                  "en-AU",
+                                  {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  }
+                                )}`}
                               >
                                 <Chip
                                   size="small"
@@ -280,7 +372,8 @@ export default function JobListPage() {
                                   sx={{
                                     bgcolor: "rgba(33,150,243,0.2)",
                                     color: "#90caf9",
-                                    border: "1px solid rgba(33,150,243,0.4)",
+                                    border:
+                                      "1px solid rgba(33,150,243,0.4)",
                                     fontWeight: 800,
                                     cursor: "help",
                                   }}
@@ -293,8 +386,21 @@ export default function JobListPage() {
                     </Box>
                   </Box>
 
-                  <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 1 }}>
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "flex-end",
+                      gap: 1,
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 1,
+                      }}
+                    >
                       <IconBadge
                         icon={<PhotoCameraRoundedIcon fontSize="small" />}
                         label={photos}
@@ -313,7 +419,8 @@ export default function JobListPage() {
                         sx={{
                           bgcolor: "rgba(0, 188, 212, 0.20)",
                           color: "#80deea",
-                          border: "1px solid rgba(0,188,212,0.45)",
+                          border:
+                            "1px solid rgba(0,188,212,0.45)",
                           fontWeight: 800,
                         }}
                       />
