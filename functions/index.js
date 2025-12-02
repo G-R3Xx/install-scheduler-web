@@ -98,7 +98,7 @@ exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
 
 // ------------------------------------------------------------------
 // EMAIL ON COMPLETION — Gmail (SMTP + App Password)
-// Fires only when status transitions TO "completed"
+// Fires only when status transitions TO "completed" (unchanged)
 // ------------------------------------------------------------------
 exports.sendCompletionEmail = onDocumentUpdated(
   { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
@@ -250,7 +250,159 @@ exports.sendCompletionEmail = onDocumentUpdated(
 );
 
 // ------------------------------------------------------------------
-// HTTPS test endpoint — quick way to verify SMTP + secrets
+// NEW: CLIENT COMPLETION EMAIL (NO HOURS)
+// Manual trigger from Job Detail – sends to job.email
+// ------------------------------------------------------------------
+exports.sendClientCompletionEmail = onRequest(
+  { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
+  async (req, res) => {
+    try {
+      if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+      }
+
+      const jobId = req.body?.jobId || req.query?.jobId;
+      if (!jobId) {
+        res.status(400).send('Missing jobId');
+        return;
+      }
+
+      const jobRef = db.collection('jobs').doc(jobId);
+      const jobSnap = await jobRef.get();
+      if (!jobSnap.exists) {
+        res.status(404).send('Job not found');
+        return;
+      }
+
+      const job = jobSnap.data() || {};
+      if (!job.email || !String(job.email).includes('@')) {
+        res.status(400).send('Job has no valid client email');
+        return;
+      }
+
+      const clientName = job.clientName || job.contactName || 'Valued client';
+
+      // Completed photos (same pattern as management email)
+      const completedSnap = await jobRef.collection('completedPhotos').get();
+      const photos = completedSnap.docs.map((d) => d.data());
+      const photosHtml = photos.length
+        ? photos.map((p) => `
+            <div style="margin:4px 0;">
+              <img src="${p.url}" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />
+            </div>
+          `).join('')
+        : '<p>(No photos attached)</p>';
+
+      // Signature if available
+      const signatureHtml = job.signatureURL
+        ? `<p><strong>Sign-off:</strong></p>
+           <img src="${job.signatureURL}" style="max-width:300px;border:1px solid #ddd;border-radius:4px;" />`
+        : '';
+
+      // Date
+      const installDate = job.installDate?.toDate?.() || null;
+      const dateStr = installDate
+        ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
+        : '';
+
+      // Notes – light cleanup
+      const notesHtml = (job.installerNotes || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
+
+      const subject = `Your install is complete — ${clientName}`;
+
+      const html = `
+        <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111;line-height:1.5;">
+          <p>Hi ${clientName},</p>
+          <p>Your installation has been completed.</p>
+
+          <h3 style="margin-top:16px;">Job summary</h3>
+          <ul style="padding-left:18px;">
+            <li><strong>Client:</strong> ${job.clientName || ''}</li>
+            <li><strong>Company:</strong> ${job.company || ''}</li>
+            <li><strong>Address:</strong> ${job.address || ''}</li>
+            ${dateStr ? `<li><strong>Install date:</strong> ${dateStr}</li>` : ''}
+            ${job.jobNumber ? `<li><strong>Job #:</strong> ${job.jobNumber}</li>` : ''}
+            ${job.description ? `<li><strong>Description:</strong> ${job.description}</li>` : ''}
+          </ul>
+
+          ${notesHtml
+            ? `
+              <h3 style="margin-top:16px;">Installer notes</h3>
+              <div style="background:#fafafa;border:1px solid #ddd;padding:10px;border-radius:4px;">
+                ${notesHtml}
+              </div>
+            `
+            : ''
+          }
+
+          <h3 style="margin-top:16px;">Completion photos</h3>
+          ${photosHtml}
+
+          ${signatureHtml}
+
+          <p style="margin-top:24px;">
+            If you have any questions or need any adjustments, please reply to this email.
+          </p>
+
+          <p>Thanks,<br/>Tender Edge Install Team</p>
+        </div>
+      `;
+
+      const text = [
+        `Hi ${clientName},`,
+        '',
+        'Your installation has been completed.',
+        '',
+        `Client: ${job.clientName || ''}`,
+        `Company: ${job.company || ''}`,
+        `Address: ${job.address || ''}`,
+        dateStr ? `Install date: ${dateStr}` : '',
+        job.jobNumber ? `Job #: ${job.jobNumber}` : '',
+        job.description ? `Description: ${job.description}` : '',
+        '',
+        'To see photos or sign-off, please view the HTML version of this email.',
+        '',
+        'Thanks,',
+        'Tender Edge Install Team',
+      ].filter(Boolean).join('\n');
+
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
+      });
+
+      const to = `${clientName} <${job.email}>`;
+
+      const info = await transporter.sendMail({
+        from: `"Tender Edge Install Team" <${GMAIL_USER.value()}>`,
+        to,
+        subject,
+        html,
+        text,
+      });
+
+      console.log(`Client completion email sent for job ${jobId}`, info.messageId);
+
+      // Record that we sent a client email
+      await jobRef.update({
+        clientEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      res.status(200).json({ ok: true, messageId: info.messageId });
+    } catch (err) {
+      console.error('sendClientCompletionEmail error', err?.response || err?.message || err);
+      res.status(500).send('Internal error sending client email');
+    }
+  }
+);
+
+// ------------------------------------------------------------------
+// HTTPS test endpoint — quick way to verify SMTP + secrets (unchanged)
 // ------------------------------------------------------------------
 exports.sendTestEmail = onRequest(
   { region, secrets: [MAIL_TEST_KEY, GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
@@ -276,7 +428,7 @@ exports.sendTestEmail = onRequest(
 );
 
 // ------------------------------------------------------------------
-// Optional one-off repair endpoint (kept as a stub)
+// Optional one-off repair endpoint (kept as a stub) (unchanged)
 // ------------------------------------------------------------------
 exports.repairDownloadUrls = onRequest(async (req, res) => {
   res.send({ ok: true, message: 'Not changed in this snippet' });
