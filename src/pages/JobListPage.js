@@ -6,8 +6,6 @@ import {
   Chip,
   CircularProgress,
   Paper,
-  Tabs,
-  Tab,
   Typography,
   Switch,
   Stack,
@@ -21,6 +19,8 @@ import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import { db } from "../firebase/firebase";
 import { useAuth } from "../contexts/AuthContext";
 import useActiveTimers from "../hooks/useActiveTimers";
+
+const APP_VERSION = "InstallScheduler v0.9.0";
 
 function IconBadge({ icon, label, bg = "#1976d2" }) {
   return (
@@ -42,7 +42,6 @@ export default function JobListPage() {
   const history = useHistory();
   const { userMap } = useAuth();
 
-  const [tab, setTab] = useState(0); // Jobs vs Surveys
   const [showCompleted, setShowCompleted] = useState(false); // default OFF
   const [loading, setLoading] = useState(true);
   const [jobs, setJobs] = useState([]);
@@ -121,13 +120,14 @@ export default function JobListPage() {
         Boolean(j.surveyRequest) ||
         status === "survey-request";
 
-      if (tab === 0) {
-        // Jobs tab: show normal jobs + survey-requests
-        return !isSurveyJob || isSurveyRequest;
-      } else {
-        // Surveys tab: actual surveys (not just survey-request installs)
-        return isSurveyJob && !isSurveyRequest;
-      }
+      // Single view: behave like the old "Jobs" tab
+      // - normal jobs
+      // - plus survey-requests
+      if (!isSurveyJob) return true;
+      if (isSurveyRequest) return true;
+
+      // otherwise it's a real survey and we hide it from this screen
+      return false;
     });
 
     const upcoming = [];
@@ -153,7 +153,7 @@ export default function JobListPage() {
     });
 
     return [...upcoming, ...completedArr];
-  }, [jobs, tab, showCompleted]);
+  }, [jobs, showCompleted]);
 
   // Live per-user timers
   const jobIds = useMemo(() => filtered.map((j) => j.id), [filtered]);
@@ -213,16 +213,21 @@ export default function JobListPage() {
         <Button variant="contained" onClick={() => history.push("/jobs/new")}>
           Add Job
         </Button>
-        <Tabs
-          value={tab}
-          onChange={(_, v) => setTab(v)}
-          textColor="inherit"
+
+        <Typography
+          variant="h6"
+          sx={{ fontWeight: 700, color: "#fff", ml: 1 }}
         >
-          <Tab label="Jobs" />
-          <Tab label="Surveys" />
-        </Tabs>
+          Jobs
+        </Typography>
+
         <Box
-          sx={{ ml: "auto", display: "flex", alignItems: "center", gap: 1 }}
+          sx={{
+            ml: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 1,
+          }}
         >
           <Switch
             checked={showCompleted}
@@ -432,6 +437,21 @@ export default function JobListPage() {
           </Stack>
         </Box>
       ))}
+
+      {/* Version */}
+      <Box
+        sx={{
+          mt: 2,
+          textAlign: "right",
+        }}
+      >
+        <Typography
+          variant="caption"
+          sx={{ color: "rgba(255,255,255,0.5)" }}
+        >
+          {APP_VERSION}
+        </Typography>
+      </Box>
     </Box>
   );
 }
