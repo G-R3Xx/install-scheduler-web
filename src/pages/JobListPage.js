@@ -102,6 +102,7 @@ export default function JobListPage() {
     return status === "completed" || status === "complete";
   };
 
+  // Single "Jobs" view: normal jobs + survey *requests*, hide proper surveys
   const filtered = useMemo(() => {
     let list = jobs.filter((j) => {
       const completed = isCompleted(j);
@@ -120,13 +121,13 @@ export default function JobListPage() {
         Boolean(j.surveyRequest) ||
         status === "survey-request";
 
-      // Single view: behave like the old "Jobs" tab
+      // behave like old Jobs tab:
       // - normal jobs
       // - plus survey-requests
       if (!isSurveyJob) return true;
       if (isSurveyRequest) return true;
 
-      // otherwise it's a real survey and we hide it from this screen
+      // pure surveys -> hide from this screen
       return false;
     });
 
@@ -149,7 +150,7 @@ export default function JobListPage() {
         toJSDate(b.completedAt)?.getTime() ||
         toJSDate(b.installDate)?.getTime() ||
         0;
-      return db - da; // reverse (newest first)
+      return db - da; // newest first
     });
 
     return [...upcoming, ...completedArr];
