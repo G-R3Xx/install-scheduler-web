@@ -20,7 +20,7 @@ import { db } from "../firebase/firebase";
 import { useAuth } from "../contexts/AuthContext";
 import useActiveTimers from "../hooks/useActiveTimers";
 
-const APP_VERSION = "InstallScheduler v0.9.0";
+const APP_VERSION = "InstallScheduler v25.12.03.05";
 
 function IconBadge({ icon, label, bg = "#1976d2" }) {
   return (
@@ -219,7 +219,7 @@ export default function JobListPage() {
           variant="h6"
           sx={{ fontWeight: 700, color: "#fff", ml: 1 }}
         >
-          Jobs
+        
         </Typography>
 
         <Box

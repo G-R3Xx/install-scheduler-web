@@ -112,7 +112,7 @@ exports.sendCompletionEmail = onDocumentUpdated(
     if (wasCompleted || !nowCompleted) return; // Only on the transition TO completed
 
     const job = after;
-    const client = job.clientName || 'Unknown Client';
+    const client = job.clientName || 'Unknown Job';
 
     // Build user map
     const usersSnap = await db.collection('users').get();
@@ -186,8 +186,8 @@ exports.sendCompletionEmail = onDocumentUpdated(
         <h2 style="color:#2e7d32;margin:0 0 12px;">✅ Job Completed</h2>
 
         <table cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-size:14px;margin-bottom:16px;">
-          <tr style="background:#f5f5f5;"><td><strong>Client</strong></td><td>${client}</td></tr>
-          <tr><td><strong>Company</strong></td><td>${job.company || ''}</td></tr>
+          <tr style="background:#f5f5f5;"><td><strong>Job</strong></td><td>${client}</td></tr>
+          <tr><td><strong>Client</strong></td><td>${job.company || ''}</td></tr>
           <tr style="background:#f5f5f5;"><td><strong>Address</strong></td><td>${job.address || ''}</td></tr>
           <tr><td><strong>Install Date</strong></td><td>${dateStr} ${timeStr}</td></tr>
           <tr style="background:#f5f5f5;"><td><strong>Assigned To</strong></td><td>${assignedNames}</td></tr>
@@ -233,7 +233,7 @@ exports.sendCompletionEmail = onDocumentUpdated(
     // Recipients: MGMT_EMAIL (comma-separated OK). Use Reply-To for job contact if present.
     const toList = (MGMT_EMAIL.value() || '').split(',').map(s => s.trim()).filter(Boolean);
     const replyTo = (job.email && String(job.email).includes('@'))
-      ? `${job.contactName || job.clientName || 'Client'} <${job.email}>`
+      ? `${job.contactName || job.clientName || 'Job'} <${job.email}>`
       : `"Install Scheduler" <${GMAIL_USER.value()}>`;
 
     try {
@@ -254,46 +254,63 @@ exports.sendCompletionEmail = onDocumentUpdated(
 );
 
 // ------------------------------------------------------------------
-// NEW: CLIENT COMPLETION EMAIL (NO HOURS)
-// Manual trigger from Job Detail – sends to job.email
-// ------------------------------------------------------------------
+// CLIENT COMPLETION EMAIL (NO HOURS) — with explicit CORS + debug
+// CLIENT COMPLETION EMAIL (NO HOURS) — with explicit CORS + email override + debug
 exports.sendClientCompletionEmail = onRequest(
-  { region, cors: true, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
+  { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
   async (req, res) => {
-    try {
-      if (req.method === 'OPTIONS') {
-        // CORS preflight
-        res.status(204).send('');
-        return;
-      }
+    // --- CORS headers (allow local dev + prod) ---
+    res.set('Access-Control-Allow-Origin', '*'); // you can tighten this later
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
+    if (req.method === 'OPTIONS') {
+      // Preflight
+      res.status(204).send('');
+      return;
+    }
+
+    let step = 'start';
+    try {
+      step = 'validate-method';
       if (req.method !== 'POST') {
         res.status(405).send('Method Not Allowed');
         return;
       }
 
-      const jobId = req.body?.jobId || req.query?.jobId;
+      step = 'read-body';
+      const body = req.body || {};
+      const jobId = body.jobId || req.query?.jobId;
+      const emailOverride = (body.emailOverride || '').toString().trim();
+
       if (!jobId) {
         res.status(400).send('Missing jobId');
         return;
       }
 
+      step = 'load-job';
       const jobRef = db.collection('jobs').doc(jobId);
       const jobSnap = await jobRef.get();
       if (!jobSnap.exists) {
-        res.status(404).send('Job not found');
+        res.status(404).send(`Job not found: ${jobId}`);
         return;
       }
 
       const job = jobSnap.data() || {};
-      if (!job.email || !String(job.email).includes('@')) {
-        res.status(400).send('Job has no valid client email');
+
+      step = 'validate-email';
+      // Prefer override if provided, fallback to job.email
+      const targetEmail = emailOverride || (job.email || '').toString().trim();
+
+      if (!targetEmail || !targetEmail.includes('@')) {
+        res.status(400).send('Job has no valid client email (including override)');
         return;
       }
 
       const clientName = job.clientName || job.contact || 'Valued client';
 
-      // Completed photos
+      // --- Completed photos ---
+      step = 'load-photos';
       const completedSnap = await jobRef.collection('completedPhotos').get();
       const photos = completedSnap.docs.map((d) => d.data());
       const photosHtml = photos.length
@@ -304,34 +321,45 @@ exports.sendClientCompletionEmail = onRequest(
           `).join('')
         : '<p>(No photos attached)</p>';
 
-      // Signature if available
+      // --- Signature ---
+      step = 'build-signature-html';
       const signatureHtml = job.signatureURL
         ? `<p><strong>Sign-off:</strong></p>
            <img src="${job.signatureURL}" style="max-width:300px;border:1px solid #ddd;border-radius:4px;" />`
         : '';
 
-      // Date
-      const installDate = job.installDate?.toDate?.() || null;
-      const dateStr = installDate
-        ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
-        : '';
+      // --- Date ---
+      step = 'format-date';
+      let dateStr = '';
+      try {
+        const installDate = job.installDate?.toDate?.() || null;
+        dateStr = installDate
+          ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
+          : '';
+      } catch (e) {
+        console.warn('Unable to format installDate for job', jobId, e);
+        dateStr = '';
+      }
 
-      // Clean up installer notes for HTML
+      // --- Notes ---
+      step = 'format-notes';
       const notesHtml = (job.installerNotes || '')
+        .toString()
         .replace(/&/g, '&amp;').replace(/</g, '&lt;')
         .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
 
+      step = 'build-email-body';
       const subject = `Your install is complete — ${clientName}`;
 
       const html = `
         <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111;line-height:1.5;">
-          <p>Hi ${clientName},</p>
+          <p>Hi ${job.company},</p>
           <p>Your installation has been completed.</p>
 
           <h3 style="margin-top:16px;">Job summary</h3>
           <ul style="padding-left:18px;">
-            <li><strong>Client:</strong> ${job.clientName || ''}</li>
-            <li><strong>Company:</strong> ${job.company || ''}</li>
+            <li><strong>Job:</strong> ${job.clientName || ''}</li>
+            <li><strong>Client:</strong> ${job.company || ''}</li>
             <li><strong>Address:</strong> ${job.address || ''}</li>
             ${dateStr ? `<li><strong>Install date:</strong> ${dateStr}</li>` : ''}
             ${job.jobNumber ? `<li><strong>Job #:</strong> ${job.jobNumber}</li>` : ''}
@@ -366,7 +394,7 @@ exports.sendClientCompletionEmail = onRequest(
         '',
         'Your installation has been completed.',
         '',
-        `Client: ${job.clientName || ''}`,
+        `Job Name: ${job.clientName || ''}`,
         `Company: ${job.company || ''}`,
         `Address: ${job.address || ''}`,
         dateStr ? `Install date: ${dateStr}` : '',
@@ -379,6 +407,8 @@ exports.sendClientCompletionEmail = onRequest(
         'Tender Edge Install Team',
       ].filter(Boolean).join('\n');
 
+      // --- SMTP send ---
+      step = 'create-transporter';
       const transporter = nodemailer.createTransport({
         host: 'smtp.gmail.com',
         port: 465,
@@ -386,8 +416,9 @@ exports.sendClientCompletionEmail = onRequest(
         auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
       });
 
-      const to = `${clientName} <${job.email}>`;
+      const to = `${clientName} <${targetEmail}>`;
 
+      step = 'send-mail';
       const info = await transporter.sendMail({
         from: `"Tender Edge Install Team" <${GMAIL_USER.value()}>`,
         to,
@@ -398,17 +429,23 @@ exports.sendClientCompletionEmail = onRequest(
 
       console.log(`Client completion email sent for job ${jobId}`, info.messageId);
 
+      step = 'update-job';
       await jobRef.update({
         clientEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       res.status(200).json({ ok: true, messageId: info.messageId });
     } catch (err) {
-      console.error('sendClientCompletionEmail error', err?.response || err?.message || err);
-      res.status(500).send('Internal error sending client email');
+      console.error('sendClientCompletionEmail error at step:', step, err);
+      res
+        .status(500)
+        .send(`Error at step "${step}": ${err?.message || err}`);
     }
   }
 );
+
+
+
 
 // ------------------------------------------------------------------
 // HTTPS test endpoint — quick way to verify SMTP + secrets

@@ -260,7 +260,7 @@ export default function CreateJobPage() {
         <Grid container spacing={2} sx={{ mb: 2 }}>
           <Grid item xs={12} md={6}>
             <TextField
-              label="Client Name"
+              label="Job"
               fullWidth
               value={clientName}
               onChange={(e) => setClientName(e.target.value)}
@@ -268,7 +268,7 @@ export default function CreateJobPage() {
           </Grid>
           <Grid item xs={12} md={6}>
             <TextField
-              label="Company"
+              label="Client"
               fullWidth
               value={company}
               onChange={(e) => setCompany(e.target.value)}

@@ -84,6 +84,8 @@ export default function JobDetailPage() {
 
   // Client email state
   const [sendingClientEmail, setSendingClientEmail] = useState(false);
+  const [emailDialogOpen, setEmailDialogOpen] = useState(false);
+  const [emailTo, setEmailTo] = useState('');
 
   const openPreview = (url) => { setPreviewUrl(url); setPreviewOpen(true); };
   const closePreview = () => { setPreviewOpen(false); setPreviewUrl(''); };
@@ -301,44 +303,52 @@ export default function JobDetailPage() {
   };
 
   // ---- Client email handler
-  const handleSendClientEmail = async () => {
-    if (!job || !job.id || !job.email) {
-      alert('Missing job or client email.');
-      return;
-    }
-
-    if (!window.confirm(`Send completion summary to ${job.email}?`)) {
-      return;
-    }
-
-    try {
-      setSendingClientEmail(true);
-
-      const res = await fetch(
-  'https://australia-southeast1-install-scheduler.cloudfunctions.net/sendClientCompletionEmail',
-  {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jobId: job.id }),
+ const handleSendClientEmail = async (overrideEmail) => {
+  if (!job || !job.id) {
+    alert('Missing job.');
+    return;
   }
-);
 
+  const targetEmail = (overrideEmail || job.email || '').trim();
 
-      if (!res.ok) {
-        const text = await res.text();
-        console.error('Client email failed:', text);
-        alert('Client email failed. Check console/logs.');
-        return;
+  if (!targetEmail || !targetEmail.includes('@')) {
+    alert('Please enter a valid email address.');
+    return;
+  }
+
+  try {
+    setSendingClientEmail(true);
+
+    const res = await fetch(
+      'https://sendclientcompletionemail-madgqp5xxa-ts.a.run.app',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId: job.id,
+          emailOverride: targetEmail,
+        }),
       }
+    );
 
-      alert('Client email sent ✅');
-    } catch (err) {
-      console.error(err);
-      alert('Client email failed. See console for details.');
-    } finally {
-      setSendingClientEmail(false);
+    const text = await res.text();
+    if (!res.ok) {
+      console.error('Client email failed:', text);
+      alert(`Client email failed: ${text}`);
+      return;
     }
-  };
+
+    console.log('Client email success:', text);
+    alert('Client email sent ✅');
+    setEmailDialogOpen(false);
+  } catch (err) {
+    console.error(err);
+    alert('Client email failed. See console for details.');
+  } finally {
+    setSendingClientEmail(false);
+  }
+};
+
 
   // ---- Derived totals
   const totalHours = useMemo(
@@ -418,6 +428,62 @@ export default function JobDetailPage() {
           <Button variant="contained" onClick={saveSignature}>Save</Button>
         </DialogActions>
       </Dialog>
+            {/* Signature dialog */}
+      <Dialog open={sigDialogOpen} onClose={closeSignatureDialog}>
+        <DialogTitle>Client Signature</DialogTitle>
+        <DialogContent>
+          <SignatureCanvas
+            penColor="black"
+            canvasProps={{ width: 360, height: 160, style: { border: '1px solid #ccc', background: '#fff' } }}
+            ref={(r) => setSigPad(r)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeSignatureDialog}>Cancel</Button>
+          <Button variant="contained" onClick={saveSignature}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Email client summary dialog */}
+      <Dialog
+        open={emailDialogOpen}
+        onClose={() => !sendingClientEmail && setEmailDialogOpen(false)}
+      >
+        <DialogTitle>Send completion summary</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            Choose the email address to send the client summary to.
+          </Typography>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Send to email"
+            type="email"
+            fullWidth
+            value={emailTo}
+            onChange={(e) => setEmailTo(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setEmailDialogOpen(false)}
+            disabled={sendingClientEmail}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={sendingClientEmail || !emailTo.trim().includes('@')}
+            onClick={() => {
+              // actually send with override
+              handleSendClientEmail(emailTo.trim());
+            }}
+          >
+            {sendingClientEmail ? 'Sending…' : 'Send email'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
 
       {/* Header / summary */}
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -433,7 +499,7 @@ export default function JobDetailPage() {
 
         <Divider sx={{ my: 1 }} />
 
-        <Typography><strong>Company:</strong> {job.company || '—'}</Typography>
+        <Typography><strong>Client:</strong> {job.company || '—'}</Typography>
         <Typography><strong>Contact:</strong> {job.contact || '—'}</Typography>
         <Typography><strong>Phone:</strong> {job.phone || '—'}</Typography>
         <Typography><strong>Email:</strong> {job.email || '—'}</Typography>
@@ -698,13 +764,18 @@ export default function JobDetailPage() {
           <Button variant="outlined" color="success" onClick={completeJob}>Complete Job</Button>
         )}
         <Button
-          variant="outlined"
-          color="primary"
-          disabled={sendingClientEmail || job.status !== 'completed' || !job.email}
-          onClick={handleSendClientEmail}
-        >
-          {sendingClientEmail ? 'Sending client email…' : 'Email client summary'}
-        </Button>
+  variant="outlined"
+  color="primary"
+  disabled={sendingClientEmail || job.status !== 'completed'}
+  onClick={() => {
+    // prefill with job.email if present
+    setEmailTo(job.email || '');
+    setEmailDialogOpen(true);
+  }}
+>
+  {sendingClientEmail ? 'Sending client email…' : 'Email client summary'}
+</Button>
+
       </Box>
     </Box>
   );
