@@ -1,8 +1,27 @@
 // src/pages/JobDetailPage.js
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
-  Box, Typography, Button, Divider, Grid, Chip, TextField, Paper,
-  IconButton, CircularProgress, Backdrop, Dialog, DialogTitle, DialogContent, DialogActions, Link, Stack
+  Box,
+  Typography,
+  Button,
+  Divider,
+  Grid,
+  Chip,
+  TextField,
+  Paper,
+  IconButton,
+  CircularProgress,
+  Backdrop,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Link,
+  Stack,
+  FormGroup,
+  FormControlLabel,
+  Checkbox,
+  MenuItem,
 } from '@mui/material';
 import DeleteIcon from '@mui/icons-material/Delete';
 import AccessTimeRoundedIcon from '@mui/icons-material/AccessTimeRounded';
@@ -10,8 +29,15 @@ import PictureAsPdfRoundedIcon from '@mui/icons-material/PictureAsPdfRounded';
 import InsertPhotoRoundedIcon from '@mui/icons-material/InsertPhotoRounded';
 import { useParams, useHistory } from 'react-router-dom';
 import {
-  doc, getDoc, updateDoc, collection, addDoc, getDocs,
-  serverTimestamp, deleteDoc, Timestamp
+  doc,
+  getDoc,
+  updateDoc,
+  collection,
+  addDoc,
+  getDocs,
+  serverTimestamp,
+  deleteDoc,
+  Timestamp,
 } from 'firebase/firestore';
 import { db, storage } from '../firebase/firebase';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
@@ -33,11 +59,20 @@ function BusyOverlay({ open, text }) {
 }
 
 const toJSDate = (tsOrDate) =>
-  tsOrDate?.toDate?.() instanceof Date ? tsOrDate.toDate()
-    : tsOrDate instanceof Date ? tsOrDate : null;
+  tsOrDate?.toDate?.() instanceof Date
+    ? tsOrDate.toDate()
+    : tsOrDate instanceof Date
+    ? tsOrDate
+    : null;
 
 const fmtDate = (date) =>
-  !date ? '—' : date.toLocaleDateString(undefined, { day: '2-digit', month: '2-digit', year: 'numeric' });
+  !date
+    ? '—'
+    : date.toLocaleDateString(undefined, {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      });
 
 const fmtTime = (date) =>
   !date ? '' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -46,6 +81,11 @@ const fmtTimeHM = (date) =>
   !date ? '—' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Cloud Functions base (override via REACT_APP_FUNCTIONS_BASE_URL if desired)
+const FUNCTIONS_BASE =
+  process.env.REACT_APP_FUNCTIONS_BASE_URL ||
+  'https://australia-southeast1-install-scheduler.cloudfunctions.net';
 
 export default function JobDetailPage() {
   const params = useParams();
@@ -60,10 +100,10 @@ export default function JobDetailPage() {
   const [installerNotes, setInstallerNotes] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
 
-  const [completedPhotos, setCompletedPhotos] = useState([]);   // [{id,url,createdAt}]
-  const [referencePhotos, setReferencePhotos] = useState([]);   // [{id,url,createdAt}]
-  const [plans, setPlans] = useState([]);                       // [{id,url,name,createdAt}]
-  const [timeEntries, setTimeEntries] = useState([]);           // [{id,userId,hours,createdAt,start,end,source}]
+  const [completedPhotos, setCompletedPhotos] = useState([]); // [{id,url,createdAt}]
+  const [referencePhotos, setReferencePhotos] = useState([]); // [{id,url,createdAt}]
+  const [plans, setPlans] = useState([]); // [{id,url,name,createdAt}]
+  const [timeEntries, setTimeEntries] = useState([]); // [{id,userId,hours,createdAt,start,end,source}]
   const [newHours, setNewHours] = useState('');
 
   // Timer (persistent, backed by Firestore running entry)
@@ -87,8 +127,27 @@ export default function JobDetailPage() {
   const [emailDialogOpen, setEmailDialogOpen] = useState(false);
   const [emailTo, setEmailTo] = useState('');
 
-  const openPreview = (url) => { setPreviewUrl(url); setPreviewOpen(true); };
-  const closePreview = () => { setPreviewOpen(false); setPreviewUrl(''); };
+  // Installer reminder dialog state
+  const [reminderOpen, setReminderOpen] = useState(false);
+  const [sendingReminder, setSendingReminder] = useState(false);
+  const [reminderUsers, setReminderUsers] = useState([]); // array of userIds
+  const [reminderFields, setReminderFields] = useState({
+    referencePhotos: false,
+    completedPhotos: false,
+    signature: false,
+    hours: false,
+    installerNotes: false,
+  });
+  const [reminderMessage, setReminderMessage] = useState('');
+
+  const openPreview = (url) => {
+    setPreviewUrl(url);
+    setPreviewOpen(true);
+  };
+  const closePreview = () => {
+    setPreviewOpen(false);
+    setPreviewUrl('');
+  };
 
   const loadAll = useCallback(async () => {
     if (!jobId) return;
@@ -120,7 +179,9 @@ export default function JobDetailPage() {
     }
   }, [jobId]);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
   // Restore timer on mount and keep ticking
   useEffect(() => {
@@ -141,12 +202,72 @@ export default function JobDetailPage() {
 
   const assignedNames = useMemo(() => {
     if (!job) return '—';
-    const ids = Array.isArray(job.assignedTo) ? job.assignedTo : job.assignedTo ? [job.assignedTo] : [];
+    const ids = Array.isArray(job.assignedTo)
+      ? job.assignedTo
+      : job.assignedTo
+      ? [job.assignedTo]
+      : [];
     if (!ids.length) return 'Unassigned';
-    return ids.map(uid =>
-      userMap?.[uid]?.shortName || userMap?.[uid]?.displayName || userMap?.[uid]?.email || 'User'
-    ).join(', ');
+    return ids
+      .map(
+        (uid) =>
+          userMap?.[uid]?.shortName ||
+          userMap?.[uid]?.displayName ||
+          userMap?.[uid]?.email ||
+          'User'
+      )
+      .join(', ');
   }, [job, userMap]);
+
+  // Options for installer reminder user selector (assigned users only)
+  const assignedUserOptions = useMemo(() => {
+    if (!job) return [];
+    const ids = Array.isArray(job.assignedTo)
+      ? job.assignedTo
+      : job.assignedTo
+      ? [job.assignedTo]
+      : [];
+    if (!ids.length) return [];
+    return ids.map((uid) => ({
+      id: uid,
+      label:
+        userMap?.[uid]?.shortName ||
+        userMap?.[uid]?.displayName ||
+        userMap?.[uid]?.email ||
+        uid,
+    }));
+  }, [job, userMap]);
+
+  // Default reminder checkboxes & default recipients when job content changes (but dialog closed)
+  useEffect(() => {
+    if (!job || reminderOpen) return;
+
+    const ids = Array.isArray(job.assignedTo)
+      ? job.assignedTo
+      : job.assignedTo
+      ? [job.assignedTo]
+      : [];
+    if (ids.length && reminderUsers.length === 0) {
+      setReminderUsers(ids);
+    }
+
+    setReminderFields({
+      referencePhotos: referencePhotos.length === 0,
+      completedPhotos: completedPhotos.length === 0,
+      signature: !signatureURL,
+      hours: timeEntries.length === 0,
+      installerNotes: !installerNotes?.trim(),
+    });
+  }, [
+    job,
+    referencePhotos,
+    completedPhotos,
+    signatureURL,
+    timeEntries,
+    installerNotes,
+    reminderOpen,
+    reminderUsers.length,
+  ]);
 
   // --- Completed photos: upload & remove
   const handleUploadCompleted = async (files) => {
@@ -158,7 +279,10 @@ export default function JobDetailPage() {
         const r = ref(storage, `jobs/${jobId}/completed/${Date.now()}_${f.name}`);
         await uploadBytes(r, f);
         const url = await getDownloadURL(r);
-        await addDoc(collection(db, 'jobs', jobId, 'completedPhotos'), { url, createdAt: serverTimestamp() });
+        await addDoc(collection(db, 'jobs', jobId, 'completedPhotos'), {
+          url,
+          createdAt: serverTimestamp(),
+        });
       }
       await loadAll();
     } finally {
@@ -188,7 +312,10 @@ export default function JobDetailPage() {
   const saveNotes = async () => {
     try {
       setSavingNotes(true);
-      await updateDoc(doc(db, 'jobs', jobId), { installerNotes, updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, 'jobs', jobId), {
+        installerNotes,
+        updatedAt: serverTimestamp(),
+      });
     } finally {
       setSavingNotes(false);
     }
@@ -277,7 +404,10 @@ export default function JobDetailPage() {
   };
 
   const reopenJob = async () => {
-    await updateDoc(doc(db, 'jobs', jobId), { status: 'in progress', updatedAt: serverTimestamp() });
+    await updateDoc(doc(db, 'jobs', jobId), {
+      status: 'in progress',
+      updatedAt: serverTimestamp(),
+    });
     loadAll();
   };
 
@@ -294,7 +424,10 @@ export default function JobDetailPage() {
       const r = ref(storage, `jobs/${jobId}/signature.png`);
       await uploadBytes(r, blob);
       const url = await getDownloadURL(r);
-      await updateDoc(doc(db, 'jobs', jobId), { signatureURL: url, updatedAt: serverTimestamp() });
+      await updateDoc(doc(db, 'jobs', jobId), {
+        signatureURL: url,
+        updatedAt: serverTimestamp(),
+      });
       setSignatureURL(url);
       closeSignatureDialog();
     } finally {
@@ -303,52 +436,102 @@ export default function JobDetailPage() {
   };
 
   // ---- Client email handler
- const handleSendClientEmail = async (overrideEmail) => {
-  if (!job || !job.id) {
-    alert('Missing job.');
-    return;
-  }
+  const handleSendClientEmail = async (overrideEmail) => {
+    if (!job || !job.id) {
+      alert('Missing job.');
+      return;
+    }
 
-  const targetEmail = (overrideEmail || job.email || '').trim();
+    const targetEmail = (overrideEmail || job.email || '').trim();
 
-  if (!targetEmail || !targetEmail.includes('@')) {
-    alert('Please enter a valid email address.');
-    return;
-  }
+    if (!targetEmail || !targetEmail.includes('@')) {
+      alert('Please enter a valid email address.');
+      return;
+    }
 
-  try {
-    setSendingClientEmail(true);
+    try {
+      setSendingClientEmail(true);
 
-    const res = await fetch(
-      'https://sendclientcompletionemail-madgqp5xxa-ts.a.run.app',
-      {
+      const res = await fetch('https://sendclientcompletionemail-madgqp5xxa-ts.a.run.app', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           jobId: job.id,
           emailOverride: targetEmail,
         }),
-      }
-    );
+      });
 
-    const text = await res.text();
-    if (!res.ok) {
-      console.error('Client email failed:', text);
-      alert(`Client email failed: ${text}`);
+      const text = await res.text();
+      if (!res.ok) {
+        console.error('Client email failed:', text);
+        alert(`Client email failed: ${text}`);
+        return;
+      }
+
+      console.log('Client email success:', text);
+      alert('Client email sent ✅');
+      setEmailDialogOpen(false);
+    } catch (err) {
+      console.error(err);
+      alert('Client email failed. See console for details.');
+    } finally {
+      setSendingClientEmail(false);
+    }
+  };
+
+  // ---- Installer reminder handler
+  const handleSendReminder = async () => {
+    if (!job || !job.id) {
+      alert('Missing job.');
       return;
     }
 
-    console.log('Client email success:', text);
-    alert('Client email sent ✅');
-    setEmailDialogOpen(false);
-  } catch (err) {
-    console.error(err);
-    alert('Client email failed. See console for details.');
-  } finally {
-    setSendingClientEmail(false);
-  }
-};
+    if (!reminderUsers.length) {
+      alert('Select at least one installer.');
+      return;
+    }
 
+    const selectedFields = Object.entries(reminderFields)
+      .filter(([, checked]) => checked)
+      .map(([key]) => key);
+
+    if (!selectedFields.length) {
+      alert('Select at least one item to remind them about.');
+      return;
+    }
+
+    try {
+      setSendingReminder(true);
+
+      const res = await fetch(`${FUNCTIONS_BASE}/sendInstallerReminder`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId: job.id,
+          userIds: reminderUsers,
+          fields: selectedFields,
+          message: reminderMessage,
+        }),
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        console.error('Installer reminder failed:', text);
+        alert(`Reminder failed: ${text}`);
+        return;
+      }
+
+      console.log('Installer reminder success:', text);
+      alert('Reminder sent to installers ✅');
+      setReminderOpen(false);
+      setReminderMessage('');
+    } catch (err) {
+      console.error(err);
+      alert('Reminder failed. See console for details.');
+    } finally {
+      setSendingReminder(false);
+    }
+  };
 
   // ---- Derived totals
   const totalHours = useMemo(
@@ -375,21 +558,42 @@ export default function JobDetailPage() {
     return Array.from(map.entries());
   }, [timeEntries]);
 
-  const userTotal = useCallback((uid) => {
-    return round2((timeEntries || []).filter(e => (e.userId || 'unknown') === uid)
-      .reduce((s, e) => s + (Number(e.hours) || 0), 0));
-  }, [timeEntries]);
+  const userTotal = useCallback(
+    (uid) => {
+      return round2(
+        (timeEntries || [])
+          .filter((e) => (e.userId || 'unknown') === uid)
+          .reduce((s, e) => s + (Number(e.hours) || 0), 0)
+      );
+    },
+    [timeEntries]
+  );
 
   const fmtElapsed = (ms) => {
     const h = Math.floor(ms / 3600000);
     const m = Math.floor((ms % 3600000) / 60000);
     const s = Math.floor((ms % 60000) / 1000);
-    return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  if (!jobId) return <Box p={2}><Typography color="error">Invalid job id.</Typography></Box>;
-  if (loading) return <Box p={2}><Typography>Loading…</Typography></Box>;
-  if (!job) return <Box p={2}><Typography>Job not found.</Typography></Box>;
+  if (!jobId)
+    return (
+      <Box p={2}>
+        <Typography color="error">Invalid job id.</Typography>
+      </Box>
+    );
+  if (loading)
+    return (
+      <Box p={2}>
+        <Typography>Loading…</Typography>
+      </Box>
+    );
+  if (!job)
+    return (
+      <Box p={2}>
+        <Typography>Job not found.</Typography>
+      </Box>
+    );
 
   const jsDate = toJSDate(job.installDate);
 
@@ -419,28 +623,19 @@ export default function JobDetailPage() {
         <DialogContent>
           <SignatureCanvas
             penColor="black"
-            canvasProps={{ width: 360, height: 160, style: { border: '1px solid #ccc', background: '#fff' } }}
+            canvasProps={{
+              width: 360,
+              height: 160,
+              style: { border: '1px solid #ccc', background: '#fff' },
+            }}
             ref={(r) => setSigPad(r)}
           />
         </DialogContent>
         <DialogActions>
           <Button onClick={closeSignatureDialog}>Cancel</Button>
-          <Button variant="contained" onClick={saveSignature}>Save</Button>
-        </DialogActions>
-      </Dialog>
-            {/* Signature dialog */}
-      <Dialog open={sigDialogOpen} onClose={closeSignatureDialog}>
-        <DialogTitle>Client Signature</DialogTitle>
-        <DialogContent>
-          <SignatureCanvas
-            penColor="black"
-            canvasProps={{ width: 360, height: 160, style: { border: '1px solid #ccc', background: '#fff' } }}
-            ref={(r) => setSigPad(r)}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={closeSignatureDialog}>Cancel</Button>
-          <Button variant="contained" onClick={saveSignature}>Save</Button>
+          <Button variant="contained" onClick={saveSignature}>
+            Save
+          </Button>
         </DialogActions>
       </Dialog>
 
@@ -465,10 +660,7 @@ export default function JobDetailPage() {
           />
         </DialogContent>
         <DialogActions>
-          <Button
-            onClick={() => setEmailDialogOpen(false)}
-            disabled={sendingClientEmail}
-          >
+          <Button onClick={() => setEmailDialogOpen(false)} disabled={sendingClientEmail}>
             Cancel
           </Button>
           <Button
@@ -484,6 +676,99 @@ export default function JobDetailPage() {
         </DialogActions>
       </Dialog>
 
+      {/* Installer reminder dialog */}
+      <Dialog
+        open={reminderOpen}
+        onClose={() => !sendingReminder && setReminderOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Send reminder to installers</DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <Typography variant="body2" sx={{ mb: 1.5 }}>
+            Choose who to remind and what they still need to add for this job.
+          </Typography>
+
+          <TextField
+            select
+            fullWidth
+            label="Installers"
+            margin="dense"
+            SelectProps={{
+              multiple: true,
+              value: reminderUsers,
+              onChange: (e) => setReminderUsers(e.target.value),
+            }}
+            disabled={!assignedUserOptions.length}
+            helperText={
+              assignedUserOptions.length
+                ? 'Select one or more installers.'
+                : 'No installers assigned to this job.'
+            }
+          >
+            {assignedUserOptions.map((u) => (
+              <MenuItem key={u.id} value={u.id}>
+                {u.label}
+              </MenuItem>
+            ))}
+          </TextField>
+
+          <Typography variant="subtitle2" sx={{ mt: 2 }}>
+            Remind them to add:
+          </Typography>
+          <FormGroup>
+            {[
+              { key: 'referencePhotos', label: 'Reference photos' },
+              { key: 'completedPhotos', label: 'Completed photos' },
+              { key: 'signature', label: 'Client signature' },
+              { key: 'hours', label: 'Hours / timesheets' },
+              { key: 'installerNotes', label: 'Installer notes' },
+            ].map((item) => (
+              <FormControlLabel
+                key={item.key}
+                control={
+                  <Checkbox
+                    checked={reminderFields[item.key]}
+                    onChange={(e) =>
+                      setReminderFields((prev) => ({
+                        ...prev,
+                        [item.key]: e.target.checked,
+                      }))
+                    }
+                  />
+                }
+                label={item.label}
+              />
+            ))}
+          </FormGroup>
+
+          <TextField
+            label="Extra message (optional)"
+            multiline
+            minRows={3}
+            fullWidth
+            margin="dense"
+            value={reminderMessage}
+            onChange={(e) => setReminderMessage(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReminderOpen(false)} disabled={sendingReminder}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleSendReminder}
+            disabled={
+              sendingReminder ||
+              !reminderUsers.length ||
+              !Object.values(reminderFields).some(Boolean)
+            }
+          >
+            {sendingReminder ? 'Sending…' : 'Send reminder'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Header / summary */}
       <Paper sx={{ p: 2, mb: 2 }}>
@@ -493,19 +778,35 @@ export default function JobDetailPage() {
 
         {job.companyLogoUrl && (
           <Box sx={{ mb: 1 }}>
-            <img src={job.companyLogoUrl} alt="logo" style={{ height: 44, objectFit: 'contain' }} />
+            <img
+              src={job.companyLogoUrl}
+              alt="logo"
+              style={{ height: 44, objectFit: 'contain' }}
+            />
           </Box>
         )}
 
         <Divider sx={{ my: 1 }} />
 
-        <Typography><strong>Client:</strong> {job.company || '—'}</Typography>
-        <Typography><strong>Contact:</strong> {job.contact || '—'}</Typography>
-        <Typography><strong>Phone:</strong> {job.phone || '—'}</Typography>
-        <Typography><strong>Email:</strong> {job.email || '—'}</Typography>
-        <Typography><strong>Address:</strong> {job.address || '—'}</Typography>
+        <Typography>
+          <strong>Client:</strong> {job.company || '—'}
+        </Typography>
+        <Typography>
+          <strong>Contact:</strong> {job.contact || '—'}
+        </Typography>
+        <Typography>
+          <strong>Phone:</strong> {job.phone || '—'}
+        </Typography>
+        <Typography>
+          <strong>Email:</strong> {job.email || '—'}
+        </Typography>
+        <Typography>
+          <strong>Address:</strong> {job.address || '—'}
+        </Typography>
 
-        <Typography sx={{ mt: 1 }}><strong>Status:</strong> {job.status || '—'}</Typography>
+        <Typography sx={{ mt: 1 }}>
+          <strong>Status:</strong> {job.status || '—'}
+        </Typography>
         <Typography component="div" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <strong>Install Date:</strong> {fmtDate(jsDate)}
           {job.installTime && jsDate && (
@@ -518,7 +819,9 @@ export default function JobDetailPage() {
             />
           )}
         </Typography>
-        <Typography><strong>Assigned To:</strong> {assignedNames}</Typography>
+        <Typography>
+          <strong>Assigned To:</strong> {assignedNames}
+        </Typography>
 
         {Number.isFinite(Number(job.allowedHours)) && (
           <Typography sx={{ mt: 1 }}>
@@ -543,7 +846,12 @@ export default function JobDetailPage() {
                   <img
                     src={p.url}
                     alt="reference"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4 }}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      borderRadius: 4,
+                    }}
                   />
                 </Box>
               </Grid>
@@ -580,7 +888,12 @@ export default function JobDetailPage() {
                     <img
                       src={url}
                       alt={name}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4 }}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        objectFit: 'cover',
+                        borderRadius: 4,
+                      }}
                     />
                   </Box>
                 );
@@ -613,7 +926,13 @@ export default function JobDetailPage() {
         <Typography variant="h6">Completed Photos</Typography>
         <Button variant="outlined" component="label" sx={{ mt: 1 }}>
           Upload Photos
-          <input hidden type="file" accept="image/*" multiple onChange={(e) => handleUploadCompleted(e.target.files)} />
+          <input
+            hidden
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(e) => handleUploadCompleted(e.target.files)}
+          />
         </Button>
 
         <Grid container spacing={1} mt={1}>
@@ -623,13 +942,25 @@ export default function JobDetailPage() {
                 <img
                   src={p.url}
                   alt="completed"
-                  style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 4, cursor: 'zoom-in' }}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    borderRadius: 4,
+                    cursor: 'zoom-in',
+                  }}
                   onClick={() => openPreview(p.url)}
                 />
                 <IconButton
                   size="small"
                   onClick={() => removeCompletedPhoto(p)}
-                  sx={{ position: 'absolute', top: 2, right: 2, bgcolor: 'rgba(0,0,0,0.5)', color: '#fff' }}
+                  sx={{
+                    position: 'absolute',
+                    top: 2,
+                    right: 2,
+                    bgcolor: 'rgba(0,0,0,0.5)',
+                    color: '#fff',
+                  }}
                 >
                   <DeleteIcon fontSize="small" />
                 </IconButton>
@@ -651,7 +982,10 @@ export default function JobDetailPage() {
           value={installerNotes}
           onChange={(e) => setInstallerNotes(e.target.value)}
           placeholder="Notes: issues, fixings used, extra media/substrates…"
-          multiline minRows={3} fullWidth sx={{ mt: 1 }}
+          multiline
+          minRows={3}
+          fullWidth
+          sx={{ mt: 1 }}
         />
         <Button sx={{ mt: 1 }} variant="contained" onClick={saveNotes} disabled={savingNotes}>
           {savingNotes ? 'Saving…' : 'Save Notes'}
@@ -670,7 +1004,9 @@ export default function JobDetailPage() {
             />
           </Link>
         ) : (
-          <Button sx={{ mt: 1 }} variant="outlined" onClick={openSignatureDialog}>Capture Signature</Button>
+          <Button sx={{ mt: 1 }} variant="outlined" onClick={openSignatureDialog}>
+            Capture Signature
+          </Button>
         )}
       </Paper>
 
@@ -678,69 +1014,121 @@ export default function JobDetailPage() {
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
           <Typography variant="h6">Time Tracking</Typography>
-          <Typography><strong>Total Hours:</strong> {totalHours.toFixed(2)} hrs</Typography>
+          <Typography>
+            <strong>Total Hours:</strong> {totalHours.toFixed(2)} hrs
+          </Typography>
         </Stack>
 
         {Number.isFinite(Number(job.allowedHours)) && (
-          <Typography sx={{ color: totalHours <= Number(job.allowedHours) ? 'green' : 'red', mb: 1 }}>
+          <Typography
+            sx={{
+              color: totalHours <= Number(job.allowedHours) ? 'green' : 'red',
+              mb: 1,
+            }}
+          >
             <strong>Quoted Hours:</strong> {Number(job.allowedHours)}
           </Typography>
         )}
 
         {/* Per-user grouped list with readable entries */}
         <Box sx={{ display: 'grid', gap: 1.25 }}>
-          {entriesByUser.length ? entriesByUser.map(([uid, entries]) => {
-            const name = userMap?.[uid]?.shortName || userMap?.[uid]?.displayName || userMap?.[uid]?.email || uid;
-            const subtotal = userTotal(uid).toFixed(2);
-            return (
-              <Paper key={uid} variant="outlined" sx={{ p: 1.25, bgcolor: 'rgba(255,255,255,0.02)' }}>
-                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
-                  <Chip label={`${name}`} />
-                  <Chip size="small" color="primary" variant="outlined" label={`${subtotal} hrs`} />
-                </Stack>
-                <Box sx={{ display: 'grid', gap: 0.5 }}>
-                  {entries.map((e) => {
-                    const start = e.start?.toDate?.() || null;
-                    const end = e.end?.toDate?.() || null;
-                    const created = e.createdAt?.toDate?.() || null;
-                    const dateRef = start || created;
-                    const dateStr = dateRef ? fmtDate(dateRef) : '—';
-                    const rangeStr = start || end
-                      ? `${fmtTimeHM(start)} → ${fmtTimeHM(end)}`
-                      : created ? `Logged: ${fmtTimeHM(created)}` : '—';
-                    const hrs = round2(e.hours || 0);
-                    const type = (e.source || (e.start ? 'timer' : 'manual')).toUpperCase();
-                    return (
-                      <Box key={e.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                        <Chip size="small" label={dateStr} />
-                        <Typography variant="body2" sx={{ opacity: 0.85 }}>{rangeStr}</Typography>
-                        <Chip size="small" variant="outlined" label={`${hrs} h`} />
-                        <Chip size="small" variant="outlined" label={type} />
-                      </Box>
-                    );
-                  })}
-                </Box>
-              </Paper>
-            );
-          }) : (
+          {entriesByUser.length ? (
+            entriesByUser.map(([uid, entries]) => {
+              const name =
+                userMap?.[uid]?.shortName ||
+                userMap?.[uid]?.displayName ||
+                userMap?.[uid]?.email ||
+                uid;
+              const subtotal = userTotal(uid).toFixed(2);
+              return (
+                <Paper
+                  key={uid}
+                  variant="outlined"
+                  sx={{ p: 1.25, bgcolor: 'rgba(255,255,255,0.02)' }}
+                >
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.75 }}>
+                    <Chip label={`${name}`} />
+                    <Chip
+                      size="small"
+                      color="primary"
+                      variant="outlined"
+                      label={`${subtotal} hrs`}
+                    />
+                  </Stack>
+                  <Box sx={{ display: 'grid', gap: 0.5 }}>
+                    {entries.map((e) => {
+                      const start = e.start?.toDate?.() || null;
+                      const end = e.end?.toDate?.() || null;
+                      const created = e.createdAt?.toDate?.() || null;
+                      const dateRef = start || created;
+                      const dateStr = dateRef ? fmtDate(dateRef) : '—';
+                      const rangeStr =
+                        start || end
+                          ? `${fmtTimeHM(start)} → ${fmtTimeHM(end)}`
+                          : created
+                          ? `Logged: ${fmtTimeHM(created)}`
+                          : '—';
+                      const hrs = round2(e.hours || 0);
+                      const type = (e.source || (e.start ? 'timer' : 'manual')).toUpperCase();
+                      return (
+                        <Box
+                          key={e.id}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 1,
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <Chip size="small" label={dateStr} />
+                          <Typography variant="body2" sx={{ opacity: 0.85 }}>
+                            {rangeStr}
+                          </Typography>
+                          <Chip size="small" variant="outlined" label={`${hrs} h`} />
+                          <Chip size="small" variant="outlined" label={type} />
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                </Paper>
+              );
+            })
+          ) : (
             <Typography color="text.secondary">No time entries yet.</Typography>
           )}
         </Box>
 
         {/* Add hours + timer controls */}
-        <Box sx={{ display: 'flex', gap: 1, mt: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Box
+          sx={{
+            display: 'flex',
+            gap: 1,
+            mt: 1.5,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+          }}
+        >
           <TextField
-            type="number" inputProps={{ step: '0.1', min: '0' }}
-            placeholder="Add hours" value={newHours}
-            onChange={(e) => setNewHours(e.target.value)} sx={{ width: 160 }}
+            type="number"
+            inputProps={{ step: '0.1', min: '0' }}
+            placeholder="Add hours"
+            value={newHours}
+            onChange={(e) => setNewHours(e.target.value)}
+            sx={{ width: 160 }}
           />
-          <Button variant="outlined" onClick={addHours}>Submit</Button>
+          <Button variant="outlined" onClick={addHours}>
+            Submit
+          </Button>
 
           {!timerRunning ? (
-            <Button variant="contained" onClick={startTimer}>Start Timer</Button>
+            <Button variant="contained" onClick={startTimer}>
+              Start Timer
+            </Button>
           ) : (
             <>
-              <Button variant="outlined" color="error" onClick={stopTimer}>Stop Timer</Button>
+              <Button variant="outlined" color="error" onClick={stopTimer}>
+                Stop Timer
+              </Button>
               <Chip label={`Running: ${fmtElapsed(elapsed)}`} />
             </>
           )}
@@ -749,33 +1137,46 @@ export default function JobDetailPage() {
 
       {/* Footer */}
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-        <Button variant="contained" onClick={() => history.push(`/jobs/${jobId}/edit`)}>Edit Job</Button>
+        <Button variant="contained" onClick={() => history.push(`/jobs/${jobId}/edit`)}>
+          Edit Job
+        </Button>
         <Button
           variant="outlined"
           color="error"
-          onClick={async () => { await deleteDoc(doc(db, 'jobs', jobId)); history.push('/'); }}
+          onClick={async () => {
+            await deleteDoc(doc(db, 'jobs', jobId));
+            history.push('/');
+          }}
         >
           Delete Job
         </Button>
-        <Button variant="outlined" onClick={() => history.push('/')}>Back to List</Button>
+        <Button variant="outlined" onClick={() => history.push('/')}>
+          Back to List
+        </Button>
         {String(job.status || '').toLowerCase() === 'completed' ? (
-          <Button variant="outlined" color="warning" onClick={reopenJob}>Reopen Job</Button>
+          <Button variant="outlined" color="warning" onClick={reopenJob}>
+            Reopen Job
+          </Button>
         ) : (
-          <Button variant="outlined" color="success" onClick={completeJob}>Complete Job</Button>
+          <Button variant="outlined" color="success" onClick={completeJob}>
+            Complete Job
+          </Button>
         )}
         <Button
-  variant="outlined"
-  color="primary"
-  disabled={sendingClientEmail || job.status !== 'completed'}
-  onClick={() => {
-    // prefill with job.email if present
-    setEmailTo(job.email || '');
-    setEmailDialogOpen(true);
-  }}
->
-  {sendingClientEmail ? 'Sending client email…' : 'Email client summary'}
-</Button>
-
+          variant="outlined"
+          color="primary"
+          disabled={sendingClientEmail || job.status !== 'completed'}
+          onClick={() => {
+            // prefill with job.email if present
+            setEmailTo(job.email || '');
+            setEmailDialogOpen(true);
+          }}
+        >
+          {sendingClientEmail ? 'Sending client email…' : 'Email client summary'}
+        </Button>
+        <Button variant="outlined" color="secondary" onClick={() => setReminderOpen(true)}>
+          Send installer reminder
+        </Button>
       </Box>
     </Box>
   );

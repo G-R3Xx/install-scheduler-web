@@ -7,17 +7,22 @@ const admin = require('firebase-admin');
 const nodemailer = require('nodemailer');
 const { Storage } = require('@google-cloud/storage');
 
-try { admin.app(); } catch { admin.initializeApp(); }
+try {
+  admin.app();
+} catch {
+  admin.initializeApp();
+}
 
 const db = admin.firestore();
 const storage = new Storage();
 const region = 'australia-southeast1';
 
 // === Secrets ===
-const GMAIL_USER = defineSecret('GMAIL_USER');                 // e.g. installscheduler@tenderedge.com.au
+const GMAIL_USER = defineSecret('GMAIL_USER'); // e.g. installscheduler@tenderedge.com.au
 const GMAIL_APP_PASSWORD = defineSecret('GMAIL_APP_PASSWORD'); // 16-char app password
-const MGMT_EMAIL = defineSecret('MGMT_EMAIL');                 // e.g. printroom@tenderedge.com.au (comma-separated OK)
-const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY');           // for sendTestEmail endpoint
+const MGMT_EMAIL = defineSecret('MGMT_EMAIL'); // e.g. printroom@tenderedge.com.au (comma-separated OK)
+const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY'); // for sendTestEmail endpoint
+const FRONTEND_BASE_URL = defineSecret('FRONTEND_BASE_URL'); // e.g. https://installscheduler.web.app
 
 // ------------------------------------------------------------------
 // Helpers
@@ -89,10 +94,13 @@ exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
     for (const docSnap of entriesSnap.docs) {
       total += hoursFromEntry(docSnap.data() || {});
     }
-    await db.collection('jobs').doc(jobId).update({
-      hoursTotal: round2(total),
-      hoursUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+    await db
+      .collection('jobs')
+      .doc(jobId)
+      .update({
+        hoursTotal: round2(total),
+        hoursUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
   }
 );
 
@@ -104,11 +112,11 @@ exports.sendCompletionEmail = onDocumentUpdated(
   { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
   async (event) => {
     const before = event.data?.before?.data() || {};
-    const after  = event.data?.after?.data()  || {};
-    const jobId  = event.params.jobId;
+    const after = event.data?.after?.data() || {};
+    const jobId = event.params.jobId;
 
     const wasCompleted = String(before.status || '').toLowerCase() === 'completed';
-    const nowCompleted = String(after.status  || '').toLowerCase() === 'completed';
+    const nowCompleted = String(after.status || '').toLowerCase() === 'completed';
     if (wasCompleted || !nowCompleted) return; // Only on the transition TO completed
 
     const job = after;
@@ -134,7 +142,10 @@ exports.sendCompletionEmail = onDocumentUpdated(
         userMap[e.userId]?.displayName ||
         userMap[e.userId]?.email ||
         e.userId;
-      const when = e.createdAt?.toDate?.()?.toLocaleString('en-AU', { timeZone: 'Australia/Sydney' }) || '—';
+      const when =
+        e.createdAt?.toDate?.()?.toLocaleString('en-AU', {
+          timeZone: 'Australia/Sydney',
+        }) || '—';
       return `<tr><td>${user}</td><td>${hrs}</td><td>${when}</td></tr>`;
     });
     const totalRounded = round2(total);
@@ -143,10 +154,14 @@ exports.sendCompletionEmail = onDocumentUpdated(
     const completedSnap = await db.collection(`jobs/${jobId}/completedPhotos`).get();
     const photos = completedSnap.docs.map((d) => d.data());
     const photoHtml = photos.length
-      ? photos.map((p) => `
+      ? photos
+          .map(
+            (p) => `
           <a href="${p.url}" target="_blank" rel="noopener">
             <img src="${p.url}" style="width:120px;height:auto;border:1px solid #ccc;border-radius:4px;margin:4px;" />
-          </a>`).join('')
+          </a>`
+          )
+          .join('')
       : `<p style="color:#888;">No completed photos.</p>`;
 
     // Signature (URL stored on job doc as signatureURL)
@@ -158,9 +173,15 @@ exports.sendCompletionEmail = onDocumentUpdated(
 
     // Assigned names
     const assignedNames = Array.isArray(job.assignedTo)
-      ? job.assignedTo.map(uid =>
-          userMap[uid]?.shortName || userMap[uid]?.displayName || userMap[uid]?.email || uid
-        ).join(', ')
+      ? job.assignedTo
+          .map(
+            (uid) =>
+              userMap[uid]?.shortName ||
+              userMap[uid]?.displayName ||
+              userMap[uid]?.email ||
+              uid
+          )
+          .join(', ')
       : '—';
 
     // Date/time
@@ -168,18 +189,21 @@ exports.sendCompletionEmail = onDocumentUpdated(
     const dateStr = installDate
       ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
       : '—';
-    const timeStr = installDate && job.installTime
-      ? installDate.toLocaleTimeString('en-AU', {
-          timeZone: 'Australia/Sydney',
-          hour: 'numeric',
-          minute: '2-digit'
-        })
-      : '';
+    const timeStr =
+      installDate && job.installTime
+        ? installDate.toLocaleTimeString('en-AU', {
+            timeZone: 'Australia/Sydney',
+            hour: 'numeric',
+            minute: '2-digit',
+          })
+        : '';
 
     // Notes (basic HTML escape + newlines to <br/>)
     const notesHtml = (job.installerNotes || '—')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br/>');
 
     const html = `
       <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#333;">
@@ -231,17 +255,23 @@ exports.sendCompletionEmail = onDocumentUpdated(
     });
 
     // Recipients: MGMT_EMAIL (comma-separated OK). Use Reply-To for job contact if present.
-    const toList = (MGMT_EMAIL.value() || '').split(',').map(s => s.trim()).filter(Boolean);
-    const replyTo = (job.email && String(job.email).includes('@'))
-      ? `${job.contactName || job.clientName || 'Job'} <${job.email}>`
-      : `"Install Scheduler" <${GMAIL_USER.value()}>`;
+    const toList = (MGMT_EMAIL.value() || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const replyTo =
+      job.email && String(job.email).includes('@')
+        ? `${job.contactName || job.clientName || 'Job'} <${job.email}>`
+        : `"Install Scheduler" <${GMAIL_USER.value()}>`;
 
     try {
       const info = await transporter.sendMail({
-        from: `"Install Scheduler" <${GMAIL_USER.value()}>`,   // keep From = authenticated mailbox
+        from: `"Install Scheduler" <${GMAIL_USER.value()}>`, // keep From = authenticated mailbox
         to: toList,
         replyTo,
-        subject: `Job Completed — ${client}${job.jobNumber ? ` [${job.jobNumber}]` : ''}`,
+        subject: `Job Completed — ${client}${
+          job.jobNumber ? ` [${job.jobNumber}]` : ''
+        }`,
         html,
         text: `Job Completed — ${client}\n\n(HTML version includes details, hours, photos and signature.)`,
       });
@@ -254,8 +284,8 @@ exports.sendCompletionEmail = onDocumentUpdated(
 );
 
 // ------------------------------------------------------------------
-// CLIENT COMPLETION EMAIL (NO HOURS) — with explicit CORS + debug
 // CLIENT COMPLETION EMAIL (NO HOURS) — with explicit CORS + email override + debug
+// ------------------------------------------------------------------
 exports.sendClientCompletionEmail = onRequest(
   { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
   async (req, res) => {
@@ -314,11 +344,15 @@ exports.sendClientCompletionEmail = onRequest(
       const completedSnap = await jobRef.collection('completedPhotos').get();
       const photos = completedSnap.docs.map((d) => d.data());
       const photosHtml = photos.length
-        ? photos.map((p) => `
+        ? photos
+            .map(
+              (p) => `
             <div style="margin:4px 0;">
               <img src="${p.url}" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />
             </div>
-          `).join('')
+          `
+            )
+            .join('')
         : '<p>(No photos attached)</p>';
 
       // --- Signature ---
@@ -345,8 +379,10 @@ exports.sendClientCompletionEmail = onRequest(
       step = 'format-notes';
       const notesHtml = (job.installerNotes || '')
         .toString()
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br/>');
 
       step = 'build-email-body';
       const subject = `Your install is complete — ${clientName}`;
@@ -366,14 +402,15 @@ exports.sendClientCompletionEmail = onRequest(
             ${job.description ? `<li><strong>Description:</strong> ${job.description}</li>` : ''}
           </ul>
 
-          ${notesHtml
-            ? `
+          ${
+            notesHtml
+              ? `
               <h3 style="margin-top:16px;">Installer notes</h3>
               <div style="background:#fafafa;border:1px solid #ddd;padding:10px;border-radius:4px;">
                 ${notesHtml}
               </div>
             `
-            : ''
+              : ''
           }
 
           <h3 style="margin-top:16px;">Completion photos</h3>
@@ -405,7 +442,9 @@ exports.sendClientCompletionEmail = onRequest(
         '',
         'Thanks,',
         'Tender Edge Install Team',
-      ].filter(Boolean).join('\n');
+      ]
+        .filter(Boolean)
+        .join('\n');
 
       // --- SMTP send ---
       step = 'create-transporter';
@@ -437,15 +476,183 @@ exports.sendClientCompletionEmail = onRequest(
       res.status(200).json({ ok: true, messageId: info.messageId });
     } catch (err) {
       console.error('sendClientCompletionEmail error at step:', step, err);
-      res
-        .status(500)
-        .send(`Error at step "${step}": ${err?.message || err}`);
+      res.status(500).send(`Error at step "${step}": ${err?.message || err}`);
     }
   }
 );
 
+// ------------------------------------------------------------------
+// INSTALLER REMINDER EMAIL — from JobDetailPage popup
+// ------------------------------------------------------------------
+exports.sendInstallerReminder = onRequest(
+  { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, FRONTEND_BASE_URL] },
+  async (req, res) => {
+    // CORS
+    res.set('Access-Control-Allow-Origin', '*'); // tighten later if needed
+    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
+    if (req.method === 'OPTIONS') {
+      res.status(204).send('');
+      return;
+    }
 
+    let step = 'start';
+    try {
+      step = 'validate-method';
+      if (req.method !== 'POST') {
+        res.status(405).send('Method Not Allowed');
+        return;
+      }
+
+      step = 'read-body';
+      const body = req.body || {};
+      const jobId = body.jobId;
+      const userIds = Array.isArray(body.userIds) ? body.userIds : [];
+      const fields = Array.isArray(body.fields) ? body.fields : [];
+      const extraMessage = (body.message || '').toString().trim();
+
+      if (!jobId) {
+        res.status(400).send('Missing jobId');
+        return;
+      }
+      if (!userIds.length) {
+        res.status(400).send('No userIds provided');
+        return;
+      }
+
+      step = 'load-job';
+      const jobRef = db.collection('jobs').doc(jobId);
+      const jobSnap = await jobRef.get();
+      if (!jobSnap.exists) {
+        res.status(404).send(`Job not found: ${jobId}`);
+        return;
+      }
+      const job = jobSnap.data() || {};
+
+      step = 'load-users';
+      const userRefs = userIds.map((uid) => db.collection('users').doc(uid));
+      const userSnaps = await db.getAll(...userRefs);
+      const recipients = userSnaps
+        .filter((snap) => snap.exists)
+        .map((snap) => {
+          const u = snap.data() || {};
+          const email = (u.email || '').toString().trim();
+          return {
+            email,
+            name: u.shortName || u.displayName || email,
+          };
+        })
+        .filter((r) => r.email && r.email.includes('@'));
+
+      if (!recipients.length) {
+        res.status(400).send('No valid recipient emails found');
+        return;
+      }
+
+      step = 'build-email';
+      const friendlyFieldNames = {
+        referencePhotos: 'Reference photos',
+        completedPhotos: 'Completed photos',
+        signature: 'Client signature',
+        hours: 'Hours / timesheets',
+        installerNotes: 'Installer notes',
+      };
+
+      const fieldLabels = fields.length
+        ? fields.map((key) => friendlyFieldNames[key] || key)
+        : ['Pending items'];
+
+      const fieldHtml = fieldLabels.map((label) => `<li>${label}</li>`).join('');
+      const fieldText = fieldLabels.map((label) => `• ${label}`).join('\n');
+
+      const jobTitle =
+        job.clientName || job.company || job.jobNumber || `Job ${jobId}`;
+
+      const baseUrlRaw =
+        (FRONTEND_BASE_URL.value && FRONTEND_BASE_URL.value()) ||
+        'https://installscheduler.web.app';
+      const baseUrl = baseUrlRaw.replace(/\/+$/, '');
+      const jobUrl = `${baseUrl}/jobs/${jobId}`;
+
+      const safeExtraHtml = extraMessage
+        ? extraMessage
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\n/g, '<br/>')
+        : '';
+
+      const subject = `Reminder: Update job – ${jobTitle}`;
+
+      const html = `
+        <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111;line-height:1.5;">
+          <p>Hi team,</p>
+          <p>This is a reminder to finish the following items on job <strong>${jobTitle}</strong>.</p>
+          <h3 style="margin-top:12px;">Items to update</h3>
+          <ul>${fieldHtml}</ul>
+          ${
+            safeExtraHtml
+              ? `<p><strong>Note from manager:</strong><br>${safeExtraHtml}</p>`
+              : ''
+          }
+          <p style="margin-top:16px;">
+            <a href="${jobUrl}">Open this job in InstallScheduler</a>
+          </p>
+        </div>
+      `;
+
+      const textLines = [
+        'Hi team,',
+        '',
+        `This is a reminder to finish the following items on job "${jobTitle}":`,
+        '',
+        fieldText,
+        '',
+        extraMessage ? `Note from manager:\n${extraMessage}` : '',
+        '',
+        `Open this job: ${jobUrl}`,
+      ].filter(Boolean);
+      const text = textLines.join('\n');
+
+      step = 'create-transporter';
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
+      });
+
+      const to = recipients.map((r) =>
+        r.name ? `${r.name} <${r.email}>` : r.email
+      );
+
+      step = 'send-mail';
+      const info = await transporter.sendMail({
+        from: `"Install Scheduler" <${GMAIL_USER.value()}>`,
+        to,
+        subject,
+        html,
+        text,
+      });
+
+      step = 'log-reminder';
+      await jobRef.collection('reminders').add({
+        userIds,
+        fields,
+        message: extraMessage,
+        recipients: to,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      console.log('sendInstallerReminder sent', jobId, info.messageId);
+      res.status(200).json({ ok: true, messageId: info.messageId });
+    } catch (err) {
+      console.error('sendInstallerReminder error at step', step, err);
+      res.status(500).send(`Error at step "${step}": ${err?.message || err}`);
+    }
+  }
+);
 
 // ------------------------------------------------------------------
 // HTTPS test endpoint — quick way to verify SMTP + secrets
@@ -464,7 +671,7 @@ exports.sendTestEmail = onRequest(
 
     const info = await transporter.sendMail({
       from: `"Install Scheduler" <${GMAIL_USER.value()}>`,
-      to: (req.query.to || MGMT_EMAIL.value()),
+      to: req.query.to || MGMT_EMAIL.value(),
       subject: 'Test: Install Scheduler mail pipeline',
       text: 'This is a test from Cloud Functions via Gmail SMTP.',
     });
