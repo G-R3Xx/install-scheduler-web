@@ -18,11 +18,11 @@ const storage = new Storage();
 const region = 'australia-southeast1';
 
 // === Secrets ===
-const GMAIL_USER = defineSecret('GMAIL_USER'); // e.g. installscheduler@tenderedge.com.au
+const GMAIL_USER = defineSecret('GMAIL_USER');                 // e.g. installscheduler@tenderedge.com.au
 const GMAIL_APP_PASSWORD = defineSecret('GMAIL_APP_PASSWORD'); // 16-char app password
-const MGMT_EMAIL = defineSecret('MGMT_EMAIL'); // e.g. printroom@tenderedge.com.au (comma-separated OK)
-const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY'); // for sendTestEmail endpoint
-const FRONTEND_BASE_URL = defineSecret('FRONTEND_BASE_URL'); // e.g. https://installscheduler.web.app
+const MGMT_EMAIL = defineSecret('MGMT_EMAIL');                 // e.g. printroom@tenderedge.com.au (comma-separated OK)
+const MAIL_TEST_KEY = defineSecret('MAIL_TEST_KEY');           // for sendTestEmail endpoint
+const FRONTEND_BASE_URL = defineSecret('FRONTEND_BASE_URL');   // e.g. https://installscheduler.web.app
 
 // ------------------------------------------------------------------
 // Helpers
@@ -94,13 +94,10 @@ exports.recalcJobHoursOnTimeEntryWrite = onDocumentWritten(
     for (const docSnap of entriesSnap.docs) {
       total += hoursFromEntry(docSnap.data() || {});
     }
-    await db
-      .collection('jobs')
-      .doc(jobId)
-      .update({
-        hoursTotal: round2(total),
-        hoursUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+    await db.collection('jobs').doc(jobId).update({
+      hoursTotal: round2(total),
+      hoursUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
   }
 );
 
@@ -112,11 +109,11 @@ exports.sendCompletionEmail = onDocumentUpdated(
   { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
   async (event) => {
     const before = event.data?.before?.data() || {};
-    const after = event.data?.after?.data() || {};
-    const jobId = event.params.jobId;
+    const after  = event.data?.after?.data()  || {};
+    const jobId  = event.params.jobId;
 
     const wasCompleted = String(before.status || '').toLowerCase() === 'completed';
-    const nowCompleted = String(after.status || '').toLowerCase() === 'completed';
+    const nowCompleted = String(after.status  || '').toLowerCase() === 'completed';
     if (wasCompleted || !nowCompleted) return; // Only on the transition TO completed
 
     const job = after;
@@ -142,10 +139,7 @@ exports.sendCompletionEmail = onDocumentUpdated(
         userMap[e.userId]?.displayName ||
         userMap[e.userId]?.email ||
         e.userId;
-      const when =
-        e.createdAt?.toDate?.()?.toLocaleString('en-AU', {
-          timeZone: 'Australia/Sydney',
-        }) || '—';
+      const when = e.createdAt?.toDate?.()?.toLocaleString('en-AU', { timeZone: 'Australia/Sydney' }) || '—';
       return `<tr><td>${user}</td><td>${hrs}</td><td>${when}</td></tr>`;
     });
     const totalRounded = round2(total);
@@ -154,14 +148,10 @@ exports.sendCompletionEmail = onDocumentUpdated(
     const completedSnap = await db.collection(`jobs/${jobId}/completedPhotos`).get();
     const photos = completedSnap.docs.map((d) => d.data());
     const photoHtml = photos.length
-      ? photos
-          .map(
-            (p) => `
+      ? photos.map((p) => `
           <a href="${p.url}" target="_blank" rel="noopener">
             <img src="${p.url}" style="width:120px;height:auto;border:1px solid #ccc;border-radius:4px;margin:4px;" />
-          </a>`
-          )
-          .join('')
+          </a>`).join('')
       : `<p style="color:#888;">No completed photos.</p>`;
 
     // Signature (URL stored on job doc as signatureURL)
@@ -173,15 +163,9 @@ exports.sendCompletionEmail = onDocumentUpdated(
 
     // Assigned names
     const assignedNames = Array.isArray(job.assignedTo)
-      ? job.assignedTo
-          .map(
-            (uid) =>
-              userMap[uid]?.shortName ||
-              userMap[uid]?.displayName ||
-              userMap[uid]?.email ||
-              uid
-          )
-          .join(', ')
+      ? job.assignedTo.map(uid =>
+          userMap[uid]?.shortName || userMap[uid]?.displayName || userMap[uid]?.email || uid
+        ).join(', ')
       : '—';
 
     // Date/time
@@ -189,21 +173,18 @@ exports.sendCompletionEmail = onDocumentUpdated(
     const dateStr = installDate
       ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
       : '—';
-    const timeStr =
-      installDate && job.installTime
-        ? installDate.toLocaleTimeString('en-AU', {
-            timeZone: 'Australia/Sydney',
-            hour: 'numeric',
-            minute: '2-digit',
-          })
-        : '';
+    const timeStr = installDate && job.installTime
+      ? installDate.toLocaleTimeString('en-AU', {
+          timeZone: 'Australia/Sydney',
+          hour: 'numeric',
+          minute: '2-digit'
+        })
+      : '';
 
     // Notes (basic HTML escape + newlines to <br/>)
     const notesHtml = (job.installerNotes || '—')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\n/g, '<br/>');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
 
     const html = `
       <div style="font-family:system-ui,Arial,sans-serif;line-height:1.5;color:#333;">
@@ -255,23 +236,17 @@ exports.sendCompletionEmail = onDocumentUpdated(
     });
 
     // Recipients: MGMT_EMAIL (comma-separated OK). Use Reply-To for job contact if present.
-    const toList = (MGMT_EMAIL.value() || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const replyTo =
-      job.email && String(job.email).includes('@')
-        ? `${job.contactName || job.clientName || 'Job'} <${job.email}>`
-        : `"Install Scheduler" <${GMAIL_USER.value()}>`;
+    const toList = (MGMT_EMAIL.value() || '').split(',').map(s => s.trim()).filter(Boolean);
+    const replyTo = (job.email && String(job.email).includes('@'))
+      ? `${job.contactName || job.clientName || 'Job'} <${job.email}>`
+      : `"Install Scheduler" <${GMAIL_USER.value()}>`;
 
     try {
       const info = await transporter.sendMail({
-        from: `"Install Scheduler" <${GMAIL_USER.value()}>`, // keep From = authenticated mailbox
+        from: `"Install Scheduler" <${GMAIL_USER.value()}>`,   // keep From = authenticated mailbox
         to: toList,
         replyTo,
-        subject: `Job Completed — ${client}${
-          job.jobNumber ? ` [${job.jobNumber}]` : ''
-        }`,
+        subject: `Job Completed — ${client}${job.jobNumber ? ` [${job.jobNumber}]` : ''}`,
         html,
         text: `Job Completed — ${client}\n\n(HTML version includes details, hours, photos and signature.)`,
       });
@@ -284,205 +259,194 @@ exports.sendCompletionEmail = onDocumentUpdated(
 );
 
 // ------------------------------------------------------------------
-// CLIENT COMPLETION EMAIL (NO HOURS) — with explicit CORS + email override + debug
+// CLIENT SUMMARY EMAIL — Firestore trigger (no CORS, photos as attachments)
+// Fires when clientEmailRequestId changes on a job document
 // ------------------------------------------------------------------
-exports.sendClientCompletionEmail = onRequest(
-  { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
-  async (req, res) => {
-    // --- CORS headers (allow local dev + prod) ---
-    res.set('Access-Control-Allow-Origin', '*'); // you can tighten this later
-    res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+exports.sendClientSummaryEmail = onDocumentUpdated(
+  { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
+  async (event) => {
+    const before = event.data?.before?.data() || {};
+    const after  = event.data?.after?.data()  || {};
+    const jobId  = event.params.jobId;
 
-    if (req.method === 'OPTIONS') {
-      // Preflight
-      res.status(204).send('');
+    const prevReqId = before.clientEmailRequestId || null;
+    const reqId     = after.clientEmailRequestId  || null;
+
+    // Only run when there's a *new* request id
+    if (!reqId || prevReqId === reqId) return;
+
+    const job = after;
+
+    const targetEmail = (job.clientEmailTarget || job.email || '').toString().trim();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      console.warn('Client summary email requested but no valid email', { jobId, targetEmail });
       return;
     }
 
-    let step = 'start';
+    const clientName = job.clientName || job.contact || 'Valued client';
+
+    const jobRef = db.collection('jobs').doc(jobId);
+
+    // --- Completed photos as attachments ---
+    const completedSnap = await jobRef.collection('completedPhotos').get();
+    const photos = completedSnap.docs.map((d) => d.data() || {});
+
+    const attachments = [];
+    photos.forEach((p, index) => {
+      if (!p.url) return;
+
+      let filename = `photo-${index + 1}.jpg`;
+      try {
+        const u = new URL(p.url);
+        const last = u.pathname.split('/').pop() || '';
+        if (last) {
+          filename = decodeURIComponent(last.split('?')[0] || filename);
+        }
+      } catch {
+        // keep default
+      }
+
+      attachments.push({
+        filename,
+        path: p.url,           // Nodemailer will fetch public HTTPS URL
+        contentType: 'image/jpeg',
+      });
+    });
+
+    // --- Signature (inline image) ---
+    const signatureHtml = job.signatureURL
+      ? `<p><strong>Sign-off:</strong></p>
+         <img src="${job.signatureURL}" style="max-width:300px;border:1px solid #ddd;border-radius:4px;" />`
+      : '';
+
+    // --- Date ---
+    let dateStr = '';
     try {
-      step = 'validate-method';
-      if (req.method !== 'POST') {
-        res.status(405).send('Method Not Allowed');
-        return;
-      }
+      const installDate = job.installDate?.toDate?.() || null;
+      dateStr = installDate
+        ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
+        : '';
+    } catch (e) {
+      console.warn('Unable to format installDate for job', jobId, e);
+      dateStr = '';
+    }
 
-      step = 'read-body';
-      const body = req.body || {};
-      const jobId = body.jobId || req.query?.jobId;
-      const emailOverride = (body.emailOverride || '').toString().trim();
+    // --- Notes ---
+    const notesHtml = (job.installerNotes || '')
+      .toString()
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br/>');
 
-      if (!jobId) {
-        res.status(400).send('Missing jobId');
-        return;
-      }
+    const subject = `Your install is complete — ${clientName}`;
 
-      step = 'load-job';
-      const jobRef = db.collection('jobs').doc(jobId);
-      const jobSnap = await jobRef.get();
-      if (!jobSnap.exists) {
-        res.status(404).send(`Job not found: ${jobId}`);
-        return;
-      }
+    const html = `
+      <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111;line-height:1.5;">
+        <p>Hi ${job.company || clientName},</p>
+        <p>Your installation has been completed.</p>
 
-      const job = jobSnap.data() || {};
+        <h3 style="margin-top:16px;">Job summary</h3>
+        <ul style="padding-left:18px;">
+          <li><strong>Job:</strong> ${job.clientName || ''}</li>
+          <li><strong>Client:</strong> ${job.company || ''}</li>
+          <li><strong>Address:</strong> ${job.address || ''}</li>
+          ${dateStr ? `<li><strong>Install date:</strong> ${dateStr}</li>` : ''}
+          ${job.jobNumber ? `<li><strong>Job #:</strong> ${job.jobNumber}</li>` : ''}
+          ${job.description ? `<li><strong>Description:</strong> ${job.description}</li>` : ''}
+        </ul>
 
-      step = 'validate-email';
-      // Prefer override if provided, fallback to job.email
-      const targetEmail = emailOverride || (job.email || '').toString().trim();
-
-      if (!targetEmail || !targetEmail.includes('@')) {
-        res.status(400).send('Job has no valid client email (including override)');
-        return;
-      }
-
-      const clientName = job.clientName || job.contact || 'Valued client';
-
-      // --- Completed photos ---
-      step = 'load-photos';
-      const completedSnap = await jobRef.collection('completedPhotos').get();
-      const photos = completedSnap.docs.map((d) => d.data());
-      const photosHtml = photos.length
-        ? photos
-            .map(
-              (p) => `
-            <div style="margin:4px 0;">
-              <img src="${p.url}" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />
+        ${
+          notesHtml
+            ? `
+            <h3 style="margin-top:16px;">Installer notes</h3>
+            <div style="background:#fafafa;border:1px solid #ddd;padding:10px;border-radius:4px;">
+              ${notesHtml}
             </div>
           `
-            )
-            .join('')
-        : '<p>(No photos attached)</p>';
+            : ''
+        }
 
-      // --- Signature ---
-      step = 'build-signature-html';
-      const signatureHtml = job.signatureURL
-        ? `<p><strong>Sign-off:</strong></p>
-           <img src="${job.signatureURL}" style="max-width:300px;border:1px solid #ddd;border-radius:4px;" />`
-        : '';
+        ${
+          photos.length
+            ? `<p style="margin-top:16px;">Completion photos have been attached to this email for your records.</p>`
+            : `<p style="margin-top:16px;color:#777;">No completion photos were attached for this job.</p>`
+        }
 
-      // --- Date ---
-      step = 'format-date';
-      let dateStr = '';
-      try {
-        const installDate = job.installDate?.toDate?.() || null;
-        dateStr = installDate
-          ? installDate.toLocaleDateString('en-AU', { timeZone: 'Australia/Sydney' })
-          : '';
-      } catch (e) {
-        console.warn('Unable to format installDate for job', jobId, e);
-        dateStr = '';
-      }
+        ${signatureHtml}
 
-      // --- Notes ---
-      step = 'format-notes';
-      const notesHtml = (job.installerNotes || '')
-        .toString()
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br/>');
+        <p style="margin-top:24px;">
+          If you have any questions or need any adjustments, please reply to this email.
+        </p>
 
-      step = 'build-email-body';
-      const subject = `Your install is complete — ${clientName}`;
+        <p>Thanks,<br/>Tender Edge Install Team</p>
+      </div>
+    `;
 
-      const html = `
-        <div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:14px;color:#111;line-height:1.5;">
-          <p>Hi ${job.company},</p>
-          <p>Your installation has been completed.</p>
+    const text = [
+      `Hi ${clientName},`,
+      '',
+      'Your installation has been completed.',
+      '',
+      `Job Name: ${job.clientName || ''}`,
+      `Company: ${job.company || ''}`,
+      `Address: ${job.address || ''}`,
+      dateStr ? `Install date: ${dateStr}` : '',
+      job.jobNumber ? `Job #: ${job.jobNumber}` : '',
+      job.description ? `Description: ${job.description}` : '',
+      '',
+      photos.length
+        ? 'Completion photos are attached to this email.'
+        : 'No completion photos attached.',
+      job.signatureURL ? 'A copy of the sign-off is included in this email.' : '',
+      '',
+      'Thanks,',
+      'Tender Edge Install Team',
+    ]
+      .filter(Boolean)
+      .join('\n');
 
-          <h3 style="margin-top:16px;">Job summary</h3>
-          <ul style="padding-left:18px;">
-            <li><strong>Job:</strong> ${job.clientName || ''}</li>
-            <li><strong>Client:</strong> ${job.company || ''}</li>
-            <li><strong>Address:</strong> ${job.address || ''}</li>
-            ${dateStr ? `<li><strong>Install date:</strong> ${dateStr}</li>` : ''}
-            ${job.jobNumber ? `<li><strong>Job #:</strong> ${job.jobNumber}</li>` : ''}
-            ${job.description ? `<li><strong>Description:</strong> ${job.description}</li>` : ''}
-          </ul>
+    // --- SMTP send ---
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
+    });
 
-          ${
-            notesHtml
-              ? `
-              <h3 style="margin-top:16px;">Installer notes</h3>
-              <div style="background:#fafafa;border:1px solid #ddd;padding:10px;border-radius:4px;">
-                ${notesHtml}
-              </div>
-            `
-              : ''
-          }
+    const to = `${clientName} <${targetEmail}>`;
 
-          <h3 style="margin-top:16px;">Completion photos</h3>
-          ${photosHtml}
-
-          ${signatureHtml}
-
-          <p style="margin-top:24px;">
-            If you have any questions or need any adjustments, please reply to this email.
-          </p>
-
-          <p>Thanks,<br/>Tender Edge Install Team</p>
-        </div>
-      `;
-
-      const text = [
-        `Hi ${clientName},`,
-        '',
-        'Your installation has been completed.',
-        '',
-        `Job Name: ${job.clientName || ''}`,
-        `Company: ${job.company || ''}`,
-        `Address: ${job.address || ''}`,
-        dateStr ? `Install date: ${dateStr}` : '',
-        job.jobNumber ? `Job #: ${job.jobNumber}` : '',
-        job.description ? `Description: ${job.description}` : '',
-        '',
-        'To see photos or sign-off, please view the HTML version of this email.',
-        '',
-        'Thanks,',
-        'Tender Edge Install Team',
-      ]
-        .filter(Boolean)
-        .join('\n');
-
-      // --- SMTP send ---
-      step = 'create-transporter';
-      const transporter = nodemailer.createTransport({
-        host: 'smtp.gmail.com',
-        port: 465,
-        secure: true,
-        auth: { user: GMAIL_USER.value(), pass: GMAIL_APP_PASSWORD.value() },
-      });
-
-      const to = `${clientName} <${targetEmail}>`;
-
-      step = 'send-mail';
+    try {
       const info = await transporter.sendMail({
         from: `"Tender Edge Install Team" <${GMAIL_USER.value()}>`,
         to,
         subject,
         html,
         text,
+        attachments,
       });
 
-      console.log(`Client completion email sent for job ${jobId}`, info.messageId);
+      console.log(`Client summary email sent for job ${jobId}`, info.messageId);
 
-      step = 'update-job';
       await jobRef.update({
         clientEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastClientEmailRequestId: reqId,
+        lastClientEmailError: admin.firestore.FieldValue.delete(),
       });
-
-      res.status(200).json({ ok: true, messageId: info.messageId });
     } catch (err) {
-      console.error('sendClientCompletionEmail error at step:', step, err);
-      res.status(500).send(`Error at step "${step}": ${err?.message || err}`);
+      console.error('sendClientSummaryEmail failed', jobId, err);
+      await jobRef
+        .update({
+          lastClientEmailRequestId: reqId,
+          lastClientEmailError: err?.message || String(err),
+        })
+        .catch(() => {});
     }
   }
 );
 
 // ------------------------------------------------------------------
-// INSTALLER REMINDER EMAIL — from JobDetailPage popup
+// INSTALLER REMINDER EMAIL — from JobDetailPage popup (HTTP, with CORS)
 // ------------------------------------------------------------------
 exports.sendInstallerReminder = onRequest(
   { region, secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, FRONTEND_BASE_URL] },
@@ -671,7 +635,7 @@ exports.sendTestEmail = onRequest(
 
     const info = await transporter.sendMail({
       from: `"Install Scheduler" <${GMAIL_USER.value()}>`,
-      to: req.query.to || MGMT_EMAIL.value(),
+      to: (req.query.to || MGMT_EMAIL.value()),
       subject: 'Test: Install Scheduler mail pipeline',
       text: 'This is a test from Cloud Functions via Gmail SMTP.',
     });

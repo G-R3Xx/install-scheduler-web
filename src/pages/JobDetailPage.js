@@ -435,7 +435,7 @@ export default function JobDetailPage() {
     }
   };
 
-  // ---- Client email handler
+  // ---- Client email handler (Firestorm trigger, no direct HTTP) ----
   const handleSendClientEmail = async (overrideEmail) => {
     if (!job || !job.id) {
       alert('Missing job.');
@@ -443,41 +443,32 @@ export default function JobDetailPage() {
     }
 
     const targetEmail = (overrideEmail || job.email || '').trim();
-
     if (!targetEmail || !targetEmail.includes('@')) {
       alert('Please enter a valid email address.');
       return;
     }
 
+    // This random id is what tells the Cloud Function "send a new email now"
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
     try {
       setSendingClientEmail(true);
 
-      const res = await fetch('https://sendclientcompletionemail-madgqp5xxa-ts.a.run.app', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jobId: job.id,
-          emailOverride: targetEmail,
-        }),
+      await updateDoc(doc(db, 'jobs', job.id), {
+        clientEmailTarget: targetEmail,
+        clientEmailRequestId: requestId,
       });
 
-      const text = await res.text();
-      if (!res.ok) {
-        console.error('Client email failed:', text);
-        alert(`Client email failed: ${text}`);
-        return;
-      }
-
-      console.log('Client email success:', text);
-      alert('Client email sent ✅');
+      alert('Client email queued to send ✅');
       setEmailDialogOpen(false);
     } catch (err) {
-      console.error(err);
-      alert('Client email failed. See console for details.');
+      console.error('Failed to queue client email', err);
+      alert('Client email failed to queue. See console for details.');
     } finally {
       setSendingClientEmail(false);
     }
   };
+
 
   // ---- Installer reminder handler
   const handleSendReminder = async () => {
