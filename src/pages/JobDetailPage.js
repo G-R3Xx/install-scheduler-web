@@ -82,6 +82,21 @@ const fmtTimeHM = (date) =>
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// NEW: format install window from startDate/endDate/installDate
+const formatInstallWindow = (job) => {
+  if (!job) return '—';
+
+  const start = toJSDate(job.startDate || job.installDate);
+  const end = toJSDate(job.endDate || job.startDate || job.installDate);
+
+  if (!start && !end) return '—';
+  if (!end || (start && end && start.getTime() === end.getTime())) {
+    return fmtDate(start || end);
+  }
+
+  return `${fmtDate(start)} → ${fmtDate(end)}`;
+};
+
 // Cloud Functions base (override via REACT_APP_FUNCTIONS_BASE_URL if desired)
 const FUNCTIONS_BASE =
   process.env.REACT_APP_FUNCTIONS_BASE_URL ||
@@ -164,7 +179,23 @@ export default function JobDetailPage() {
       setSignatureURL(data.signatureURL || null);
 
       const compSnap = await getDocs(collection(db, 'jobs', jobId, 'completedPhotos'));
-      setCompletedPhotos(compSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
+      const completedList = compSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
+      setCompletedPhotos(completedList);
+
+      // keep a count on the job doc for JobListPage
+      const completedCount = compSnap.size;
+      if (
+        typeof data.completedPhotoCount !== 'number' ||
+        data.completedPhotoCount !== completedCount
+      ) {
+        try {
+          await updateDoc(doc(db, 'jobs', jobId), {
+            completedPhotoCount: completedCount,
+          });
+        } catch (err) {
+          console.warn('Failed to update completedPhotoCount for job', jobId, err);
+        }
+      }
 
       const refSnap = await getDocs(collection(db, 'jobs', jobId, 'referencePhotos'));
       setReferencePhotos(refSnap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) })));
@@ -272,7 +303,7 @@ export default function JobDetailPage() {
   // --- Completed photos: upload & remove
   const handleUploadCompleted = async (files) => {
     const arr = Array.from(files || []);
-    if (!arr.length) return;
+       if (!arr.length) return;
     setBusy(true);
     try {
       for (const f of arr) {
@@ -469,7 +500,6 @@ export default function JobDetailPage() {
     }
   };
 
-
   // ---- Installer reminder handler
   const handleSendReminder = async () => {
     if (!job || !job.id) {
@@ -586,7 +616,9 @@ export default function JobDetailPage() {
       </Box>
     );
 
-  const jsDate = toJSDate(job.installDate);
+  // NEW: derived install info
+  const jsInstallDate = toJSDate(job.installDate);
+  const installWindowLabel = formatInstallWindow(job);
 
   return (
     <Box sx={{ p: 2, maxWidth: 1100, mx: 'auto' }}>
@@ -798,18 +830,24 @@ export default function JobDetailPage() {
         <Typography sx={{ mt: 1 }}>
           <strong>Status:</strong> {job.status || '—'}
         </Typography>
-        <Typography component="div" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <strong>Install Date:</strong> {fmtDate(jsDate)}
-          {job.installTime && jsDate && (
+
+        {/* UPDATED: Install Window (supports multi-day) */}
+        <Typography
+          component="div"
+          sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
+        >
+          <strong>Install Window:</strong> {installWindowLabel}
+          {job.installTime && jsInstallDate && (
             <Chip
               size="small"
               icon={<AccessTimeRoundedIcon />}
-              label={fmtTime(jsDate)}
+              label={fmtTime(jsInstallDate)}
               sx={{ ml: 0.5 }}
               variant="outlined"
             />
           )}
         </Typography>
+
         <Typography>
           <strong>Assigned To:</strong> {assignedNames}
         </Typography>
@@ -820,7 +858,17 @@ export default function JobDetailPage() {
           </Typography>
         )}
       </Paper>
-
+ {/* Job Description */}
+      <Paper sx={{ p: 2, mb: 2 }}>
+        <Typography variant="h6" sx={{ mb: 1 }}>
+          Job Description
+        </Typography>
+        <Typography sx={{ whiteSpace: 'pre-line' }}>
+          {job.description && job.description.trim()
+            ? job.description
+            : 'No description provided.'}
+        </Typography>
+      </Paper>
       {/* Reference Photos (view only) */}
       <Paper sx={{ p: 2, mb: 2 }}>
         <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

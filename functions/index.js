@@ -263,7 +263,7 @@ exports.sendCompletionEmail = onDocumentUpdated(
 // Fires when clientEmailRequestId changes on a job document
 // ------------------------------------------------------------------
 exports.sendClientSummaryEmail = onDocumentUpdated(
-  { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD] },
+  { region, document: 'jobs/{jobId}', secrets: [GMAIL_USER, GMAIL_APP_PASSWORD, MGMT_EMAIL] },
   async (event) => {
     const before = event.data?.before?.data() || {};
     const after  = event.data?.after?.data()  || {};
@@ -284,34 +284,27 @@ exports.sendClientSummaryEmail = onDocumentUpdated(
     }
 
     const clientName = job.clientName || job.contact || 'Valued client';
-
     const jobRef = db.collection('jobs').doc(jobId);
 
-    // --- Completed photos as attachments ---
+    // --- Completed photos -> thumbnail HTML (no attachments) ---
     const completedSnap = await jobRef.collection('completedPhotos').get();
     const photos = completedSnap.docs.map((d) => d.data() || {});
 
-    const attachments = [];
-    photos.forEach((p, index) => {
-      if (!p.url) return;
-
-      let filename = `photo-${index + 1}.jpg`;
-      try {
-        const u = new URL(p.url);
-        const last = u.pathname.split('/').pop() || '';
-        if (last) {
-          filename = decodeURIComponent(last.split('?')[0] || filename);
-        }
-      } catch {
-        // keep default
-      }
-
-      attachments.push({
-        filename,
-        path: p.url,           // Nodemailer will fetch public HTTPS URL
-        contentType: 'image/jpeg',
-      });
-    });
+    const photosHtml = photos.length
+      ? photos
+          .filter((p) => p.url)
+          .map(
+            (p) => `
+              <a href="${p.url}" target="_blank" rel="noopener">
+                <img
+                  src="${p.url}"
+                  style="width:120px;height:auto;border:1px solid #ccc;border-radius:4px;margin:4px;"
+                />
+              </a>
+            `
+          )
+          .join('')
+      : `<p style="color:#777;">No completion photos were attached for this job.</p>`;
 
     // --- Signature (inline image) ---
     const signatureHtml = job.signatureURL
@@ -367,11 +360,10 @@ exports.sendClientSummaryEmail = onDocumentUpdated(
             : ''
         }
 
-        ${
-          photos.length
-            ? `<p style="margin-top:16px;">Completion photos have been attached to this email for your records.</p>`
-            : `<p style="margin-top:16px;color:#777;">No completion photos were attached for this job.</p>`
-        }
+        <h3 style="margin-top:16px;">Completion photos</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          ${photosHtml}
+        </div>
 
         ${signatureHtml}
 
@@ -396,9 +388,9 @@ exports.sendClientSummaryEmail = onDocumentUpdated(
       job.description ? `Description: ${job.description}` : '',
       '',
       photos.length
-        ? 'Completion photos are attached to this email.'
-        : 'No completion photos attached.',
-      job.signatureURL ? 'A copy of the sign-off is included in this email.' : '',
+        ? 'Completion photos are visible in the HTML version of this email (click the images to open them).'
+        : 'No completion photos were added for this job.',
+      job.signatureURL ? 'A copy of the sign-off is included in the HTML version of this email.' : '',
       '',
       'Thanks,',
       'Tender Edge Install Team',
@@ -415,15 +407,21 @@ exports.sendClientSummaryEmail = onDocumentUpdated(
     });
 
     const to = `${clientName} <${targetEmail}>`;
+    const mgmtEmail = (MGMT_EMAIL.value() || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     try {
       const info = await transporter.sendMail({
         from: `"Tender Edge Install Team" <${GMAIL_USER.value()}>`,
         to,
+        // BCC management if configured
+        bcc: mgmtEmail.length ? mgmtEmail : undefined,
         subject,
         html,
         text,
-        attachments,
+        // 🔴 NO attachments here – only thumbnails in HTML
       });
 
       console.log(`Client summary email sent for job ${jobId}`, info.messageId);

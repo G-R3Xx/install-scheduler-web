@@ -57,9 +57,11 @@ export default function CreateJobPage() {
   const [description, setDescription] = useState('');
 
   // Schedule / assignment
-  const [installDate, setInstallDate] = useState(''); // yyyy-mm-dd
+  const [installDate, setInstallDate] = useState(''); // start date: yyyy-mm-dd
+  const [endDate, setEndDate] = useState(''); // end date: yyyy-mm-dd
   const [installTime, setInstallTime] = useState(''); // HH:mm
   const [assignedTo, setAssignedTo] = useState([]); // array of userIds
+  const [isMultiDay, setIsMultiDay] = useState(false);
 
   // Hours / survey
   const [allowedHours, setAllowedHours] = useState('');
@@ -162,11 +164,33 @@ export default function CreateJobPage() {
     return Number.isFinite(dt.getTime()) ? Timestamp.fromDate(dt) : null;
   };
 
+  const toDateOnlyTimestamp = (dStr) => {
+    if (!dStr) return null;
+    const dt = new Date(`${dStr}T00:00:00`);
+    return Number.isFinite(dt.getTime()) ? Timestamp.fromDate(dt) : null;
+  };
+
   const handleCreate = async () => {
+    // Simple validation for multi-day range
+    if (isMultiDay && endDate && installDate && endDate < installDate) {
+      alert('End date must be on or after start date.');
+      return;
+    }
+
     try {
       setSaving(true);
 
-      const installTs = toTimestamp(installDate, installTime);
+      // Date range: startDate / endDate (date-only)
+      const startDateTs = toDateOnlyTimestamp(installDate);
+      let endDateTs = startDateTs;
+
+      if (isMultiDay && (endDate || installDate)) {
+        const effectiveEnd = endDate || installDate;
+        endDateTs = toDateOnlyTimestamp(effectiveEnd);
+      }
+
+      // Install moment (date+time)
+      const installTs = installDate ? toTimestamp(installDate, installTime) : null;
 
       const payload = {
         clientName: clientName || '',
@@ -177,11 +201,20 @@ export default function CreateJobPage() {
         address: address || '',
         description: description || '',
         allowedHours: allowedHours ? Number(allowedHours) : null,
+
+        // Scheduling fields
         installTime: installTime || null, // keep the raw time string
-        installDate: installTs, // Timestamp with time baked in
+        installDate: installTs, // main install timestamp (start + time)
+        startDate: startDateTs || null, // date-only range start
+        endDate: endDateTs || null, // date-only range end
+        isMultiDay: !!isMultiDay,
+
+        // Assignment / status
         assignedTo, // array of userIds
         status: isSurveyRequest ? 'survey-request' : 'in progress',
         isSurveyRequest,
+
+        // Meta
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         createdBy: currentUser?.uid || null,
@@ -197,7 +230,10 @@ export default function CreateJobPage() {
         setUploadingAssets(true);
 
         if (logoFile) {
-          const r = ref(storage, `jobs/${jobRef.id}/logo_${Date.now()}_${logoFile.name}`);
+          const r = ref(
+            storage,
+            `jobs/${jobRef.id}/logo_${Date.now()}_${logoFile.name}`
+          );
           await uploadBytes(r, logoFile);
           const logoUrl = await getDownloadURL(r);
           // persist on job so it shows immediately on detail & list
@@ -208,7 +244,10 @@ export default function CreateJobPage() {
         }
 
         for (const f of refPhotoFiles) {
-          const r = ref(storage, `jobs/${jobRef.id}/reference/${Date.now()}_${f.name}`);
+          const r = ref(
+            storage,
+            `jobs/${jobRef.id}/reference/${Date.now()}_${f.name}`
+          );
           await uploadBytes(r, f);
           const url = await getDownloadURL(r);
           await addDoc(collection(db, 'jobs', jobRef.id, 'referencePhotos'), {
@@ -219,7 +258,10 @@ export default function CreateJobPage() {
         }
 
         for (const f of planFiles) {
-          const r = ref(storage, `jobs/${jobRef.id}/plans/${Date.now()}_${f.name}`);
+          const r = ref(
+            storage,
+            `jobs/${jobRef.id}/plans/${Date.now()}_${f.name}`
+          );
           await uploadBytes(r, f);
           const url = await getDownloadURL(r);
           await addDoc(collection(db, 'jobs', jobRef.id, 'plans'), {
@@ -328,9 +370,29 @@ export default function CreateJobPage() {
           Scheduling & Assignment
         </Typography>
         <Grid container spacing={2} sx={{ mb: 2 }}>
-          <Grid item xs={12} md={4}>
+          {/* Multi-day toggle */}
+          <Grid item xs={12}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={isMultiDay}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setIsMultiDay(checked);
+                    if (!checked) {
+                      setEndDate('');
+                    }
+                  }}
+                />
+              }
+              label="Multi-day job"
+            />
+          </Grid>
+
+          {/* Dates / time / hours */}
+          <Grid item xs={12} md={isMultiDay ? 3 : 4}>
             <TextField
-              label="Install Date"
+              label={isMultiDay ? 'Start Date' : 'Install Date'}
               type="date"
               fullWidth
               InputLabelProps={{ shrink: true }}
@@ -338,7 +400,31 @@ export default function CreateJobPage() {
               onChange={(e) => setInstallDate(e.target.value)}
             />
           </Grid>
-          <Grid item xs={12} md={4}>
+
+          {isMultiDay && (
+            <Grid item xs={12} md={3}>
+              <TextField
+                label="End Date"
+                type="date"
+                fullWidth
+                InputLabelProps={{ shrink: true }}
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                error={
+                  Boolean(
+                    endDate && installDate && endDate < installDate
+                  )
+                }
+                helperText={
+                  endDate && installDate && endDate < installDate
+                    ? 'End date must be on or after start date'
+                    : ''
+                }
+              />
+            </Grid>
+          )}
+
+          <Grid item xs={12} md={isMultiDay ? 3 : 4}>
             <TextField
               label="Install Time"
               type="time"
@@ -349,7 +435,7 @@ export default function CreateJobPage() {
             />
           </Grid>
 
-          <Grid item xs={12} md={4}>
+          <Grid item xs={12} md={isMultiDay ? 3 : 4}>
             <TextField
               label="Quoted / Allowed Hours"
               type="number"
@@ -360,6 +446,7 @@ export default function CreateJobPage() {
             />
           </Grid>
 
+          {/* Assignment */}
           <Grid item xs={12} md={8}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
               <Typography variant="subtitle2">Assigned To</Typography>
@@ -414,7 +501,12 @@ export default function CreateJobPage() {
             </Box>
           </Grid>
 
-          <Grid item xs={12} md={4} sx={{ display: 'flex', alignItems: 'center' }}>
+          <Grid
+            item
+            xs={12}
+            md={4}
+            sx={{ display: 'flex', alignItems: 'center' }}
+          >
             <FormControlLabel
               control={
                 <Switch
@@ -462,12 +554,15 @@ export default function CreateJobPage() {
                   type="file"
                   accept="image/*"
                   multiple
-                  onChange={(e) => setRefPhotoFiles(Array.from(e.target.files || []))}
+                  onChange={(e) =>
+                    setRefPhotoFiles(Array.from(e.target.files || []))
+                  }
                 />
               </Button>
               {!!refPhotoFiles.length && (
                 <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                  {refPhotoFiles.length} image{refPhotoFiles.length > 1 ? 's' : ''} selected
+                  {refPhotoFiles.length} image
+                  {refPhotoFiles.length > 1 ? 's' : ''} selected
                 </Typography>
               )}
             </Stack>
@@ -484,12 +579,15 @@ export default function CreateJobPage() {
                   type="file"
                   accept="application/pdf"
                   multiple
-                  onChange={(e) => setPlanFiles(Array.from(e.target.files || []))}
+                  onChange={(e) =>
+                    setPlanFiles(Array.from(e.target.files || []))
+                  }
                 />
               </Button>
               {!!planFiles.length && (
                 <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                  {planFiles.length} PDF{planFiles.length > 1 ? 's' : ''} selected
+                  {planFiles.length} PDF
+                  {planFiles.length > 1 ? 's' : ''} selected
                 </Typography>
               )}
             </Stack>
@@ -498,7 +596,11 @@ export default function CreateJobPage() {
 
         {/* ACTIONS */}
         <Box sx={{ mt: 3, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-          <Button variant="contained" onClick={handleCreate} disabled={saving || uploadingAssets}>
+          <Button
+            variant="contained"
+            onClick={handleCreate}
+            disabled={saving || uploadingAssets}
+          >
             Create
           </Button>
           <Button variant="outlined" onClick={() => history.push('/')}>
