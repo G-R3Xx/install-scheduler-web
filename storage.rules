@@ -1,13 +1,31 @@
 rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
+
+    // Leads attachments
+    match /leads/{leadId}/{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Work Manager order attachments
+    match /orders/{orderId}/{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Install app uploads
+    match /jobs/{jobId}/{allPaths=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Optional user-owned uploads
     match /user_uploads/{userId}/{folder}/{allPaths=**} {
       allow read, write: if request.auth != null
                          && request.auth.uid == userId;
     }
+
+    // Block everything else
     match /{allPaths=**} {
-      allow read:  if false;
-      allow write: if false;
+      allow read, write: if false;
     }
   }
 }

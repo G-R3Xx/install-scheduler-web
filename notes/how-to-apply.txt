@@ -1,0 +1,48 @@
+Order proof email + approval portal flow
+
+Included:
+- functions/orderProofFlow.js
+
+What it adds:
+- sendOrderProofEmail HTTP function
+- orderProofApprovalPortal HTTP function
+- sends proof approval emails using files in orders/{orderId}/files with category = "proof"
+- stores proof requests in orders/{orderId}/proofs
+- updates order artwork approval fields when the client responds
+- adds notifications for proof sent / approved / changes requested
+
+Frontend status:
+- your OrderDetailPage is already wired to call sendOrderProofEmail
+- your existing proofs list should display:
+  - status
+  - recipient
+  - sent time
+  - clientResponseMessage
+  - approvalUrl
+
+How to apply:
+1. Copy functions/orderProofFlow.js into your functions folder
+
+2. In functions/index.js add:
+   const { sendOrderProofEmail, orderProofApprovalPortal } = require("./orderProofFlow");
+   exports.sendOrderProofEmail = sendOrderProofEmail;
+   exports.orderProofApprovalPortal = orderProofApprovalPortal;
+
+3. Set the portal secret:
+   firebase functions:secrets:set PROOF_PORTAL_URL
+
+4. Use this value:
+   https://australia-southeast1-install-scheduler.cloudfunctions.net/orderProofApprovalPortal
+
+5. Deploy functions:
+   firebase deploy --only functions
+
+Notes:
+- Proof files must already exist under orders/{orderId}/files and have category "proof"
+- Sending proof also sets:
+  - proofRequired = true
+  - artworkApprovalStatus = "sent"
+- Client responses update:
+  - artworkApprovalStatus
+  - artworkApprovalRespondedAt
+  - artworkApprovalResponseMessage

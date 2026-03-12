@@ -16,14 +16,14 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }) {
-  const [currentUser, setCurrentUser]     = useState(null);
-  const [userProfile, setUserProfile]     = useState(null);
-  const [loadingAuth, setLoadingAuth]     = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
   const [userList, setUserList] = useState([]);
 
   function signup(email, password) {
     return createUserWithEmailAndPassword(auth, email, password)
-      .then(cred =>
+      .then((cred) =>
         setDoc(doc(db, 'users', cred.user.uid), {
           email: cred.user.email,
           role: 'staff'
@@ -39,50 +39,55 @@ export function AuthProvider({ children }) {
     return signOut(auth);
   }
 
-  // 1) Listen for auth state changes
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, user => {
+    const unsub = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setLoadingAuth(false);
     });
     return unsub;
   }, []);
 
-  // 2) Whenever currentUser changes, fetch their profile doc
   useEffect(() => {
     if (!currentUser) {
       setUserProfile(null);
       return;
     }
+
     getDoc(doc(db, 'users', currentUser.uid))
-      .then(snap => {
+      .then((snap) => {
         if (snap.exists()) setUserProfile(snap.data());
+        else setUserProfile(null);
       })
       .catch(console.error);
   }, [currentUser]);
 
   useEffect(() => {
-  const unsubscribe = onSnapshot(collection(db, 'users'), snapshot => {
-    const users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    setUserList(users);
-  });
-  return () => unsubscribe();
-}, []);
+    const unsubscribe = onSnapshot(collection(db, 'users'), (snapshot) => {
+      const users = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data()
+      }));
+      setUserList(users);
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const userMap = userList.reduce((map, user) => {
-  map[user.id] = user;
-  return map;
-}, {});
+    map[user.id] = user;
+    return map;
+  }, {});
 
- const value = {
-  currentUser,
-  userProfile,
-  userList,
-  userMap,
-  signup,
-  login,
-  logout
-};
+  const value = {
+    currentUser,
+    userProfile,
+    profile: userProfile,
+    userList,
+    userMap,
+    signup,
+    login,
+    logout
+  };
 
   return (
     <AuthContext.Provider value={value}>

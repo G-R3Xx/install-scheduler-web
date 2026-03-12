@@ -229,52 +229,80 @@ export default function CreateJobPage() {
       try {
         setUploadingAssets(true);
 
+        const safeFileName = (name, fallback) =>
+          (name || fallback).toString().replace(/[^\w.\-]+/g, '_');
+
+        // ---- Logo ----
         if (logoFile) {
-          const r = ref(
-            storage,
-            `jobs/${jobRef.id}/logo_${Date.now()}_${logoFile.name}`
-          );
-          await uploadBytes(r, logoFile);
-          const logoUrl = await getDownloadURL(r);
-          // persist on job so it shows immediately on detail & list
-          await updateDoc(doc(db, 'jobs', jobRef.id), {
-            companyLogoUrl: logoUrl,
-            updatedAt: serverTimestamp(),
-          });
+          try {
+            const safeName = safeFileName(logoFile.name, 'logo');
+            const r = ref(
+              storage,
+              `jobs/${jobRef.id}/logo/${Date.now()}_${safeName}`
+            );
+            await uploadBytes(r, logoFile);
+            const logoUrl = await getDownloadURL(r);
+
+            // persist on job so it shows immediately on detail & list
+            await updateDoc(doc(db, 'jobs', jobRef.id), {
+              companyLogoUrl: logoUrl,
+              updatedAt: serverTimestamp(),
+            });
+          } catch (err) {
+            console.error('Logo upload failed:', err);
+            alert(`Logo upload failed: ${err?.message || err}`);
+          }
         }
 
+        // ---- Reference Photos ----
         for (const f of refPhotoFiles) {
-          const r = ref(
-            storage,
-            `jobs/${jobRef.id}/reference/${Date.now()}_${f.name}`
-          );
-          await uploadBytes(r, f);
-          const url = await getDownloadURL(r);
-          await addDoc(collection(db, 'jobs', jobRef.id, 'referencePhotos'), {
-            url,
-            fileName: f.name,
-            createdAt: serverTimestamp(),
-          });
+          try {
+            const safeName = safeFileName(f.name, 'photo');
+            const r = ref(
+              storage,
+              `jobs/${jobRef.id}/referencePhotos/${Date.now()}_${safeName}`
+            );
+            await uploadBytes(r, f);
+            const url = await getDownloadURL(r);
+
+            await addDoc(collection(db, 'jobs', jobRef.id, 'referencePhotos'), {
+              url,
+              name: f.name || null,
+              mime: f.type || null,
+              createdAt: serverTimestamp(),
+            });
+          } catch (err) {
+            console.error('Reference photo upload failed:', err);
+            alert(`Reference photo upload failed: ${err?.message || err}`);
+          }
         }
 
+        // ---- Plans / PDFs ----
         for (const f of planFiles) {
-          const r = ref(
-            storage,
-            `jobs/${jobRef.id}/plans/${Date.now()}_${f.name}`
-          );
-          await uploadBytes(r, f);
-          const url = await getDownloadURL(r);
-          await addDoc(collection(db, 'jobs', jobRef.id, 'plans'), {
-            url,
-            fileName: f.name,
-            createdAt: serverTimestamp(),
-          });
+          try {
+            const safeName = safeFileName(f.name, 'plan');
+            const r = ref(
+              storage,
+              `jobs/${jobRef.id}/plans/${Date.now()}_${safeName}`
+            );
+            await uploadBytes(r, f);
+            const url = await getDownloadURL(r);
+
+            await addDoc(collection(db, 'jobs', jobRef.id, 'plans'), {
+              url,
+              name: f.name || null,
+              mime: f.type || null,
+              createdAt: serverTimestamp(),
+            });
+          } catch (err) {
+            console.error('Plan upload failed:', err);
+            alert(`Plan upload failed: ${err?.message || err}`);
+          }
         }
       } finally {
         setUploadingAssets(false);
       }
-
-      history.push('/');
+history.push('/');
     } catch (err) {
       console.error('Create job failed:', err);
       alert('Failed to create job. Please check fields and try again.');
@@ -536,7 +564,10 @@ export default function CreateJobPage() {
                   hidden
                   type="file"
                   accept="image/*"
-                  onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
+                  onChange={(e) => {
+                    setLogoFile(e.target.files?.[0] || null);
+                    e.target.value = '';
+                  }}
                 />
               </Button>
               {logoFile && <Chip label={logoFile.name} size="small" />}
@@ -554,9 +585,10 @@ export default function CreateJobPage() {
                   type="file"
                   accept="image/*"
                   multiple
-                  onChange={(e) =>
-                    setRefPhotoFiles(Array.from(e.target.files || []))
-                  }
+                  onChange={(e) => {
+                    setRefPhotoFiles(Array.from(e.target.files || []));
+                    e.target.value = '';
+                  }}
                 />
               </Button>
               {!!refPhotoFiles.length && (
@@ -579,9 +611,10 @@ export default function CreateJobPage() {
                   type="file"
                   accept="application/pdf"
                   multiple
-                  onChange={(e) =>
-                    setPlanFiles(Array.from(e.target.files || []))
-                  }
+                  onChange={(e) => {
+                    setPlanFiles(Array.from(e.target.files || []));
+                    e.target.value = '';
+                  }}
                 />
               </Button>
               {!!planFiles.length && (

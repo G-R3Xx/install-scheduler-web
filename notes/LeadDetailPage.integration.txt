@@ -1,0 +1,13 @@
+// 1) Import into your lead detail page
+import LeadEmailsPanel from "../components/LeadEmailsPanel";
+
+// 2) Render it somewhere on the lead page
+//    Use the current lead document id / route param / selected lead id.
+<LeadEmailsPanel leadId={id} />
+
+// Example placement:
+<>
+  {/* existing lead summary / files / notes UI */}
+
+  <LeadEmailsPanel leadId={id} />
+</>

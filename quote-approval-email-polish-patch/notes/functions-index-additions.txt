@@ -1,0 +1,4 @@
+Add these exports to functions/index.js:
+
+exports.sendQuoteApprovalEmail = require("./quoteApprovalFlow").sendQuoteApprovalEmail;
+exports.quoteApprovalPortal = require("./quoteApprovalFlow").quoteApprovalPortal;

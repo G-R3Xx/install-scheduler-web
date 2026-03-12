@@ -1,0 +1,18 @@
+Quote send page patch
+
+Included file:
+- work-manager/src/pages/QuoteEditPage.jsx
+
+What this adds:
+- Send Quote dialog with recipient override + custom message
+- approval status chip on the quote page
+- approval request + response history panel
+- sent/responded timestamps on the quote page
+
+Function URL:
+- Preferred: set VITE_SEND_QUOTE_APPROVAL_EMAIL_URL in your Work Manager frontend env
+- Fallback: the page tries https://australia-southeast1-<projectId>.cloudfunctions.net/sendQuoteApprovalEmail
+
+Required backend:
+- sendQuoteApprovalEmail function must already be deployed
+- quoteApprovalPortal should already be deployed for client response links

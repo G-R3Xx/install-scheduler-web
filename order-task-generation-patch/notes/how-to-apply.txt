@@ -1,0 +1,42 @@
+Order task generation patch
+
+Included:
+- functions/orderTaskGeneration.js
+- work-manager/src/utils/orderTaskGenerator.js
+- work-manager/src/components/OrderTasksPanel.jsx
+
+What this adds:
+- auto generates production tasks when an order is created
+- stores tasks under orders/{orderId}/tasks
+- stores material summary on the order doc
+- adds notification when tasks are generated
+- gives staff a checklist UI with completed by / completed at
+- supports manual task generation for older orders that were created before this patch
+
+How to wire up backend:
+1. Copy functions/orderTaskGeneration.js into your functions folder
+2. In functions/index.js add:
+
+   const { generateOrderTasksOnCreate } = require("./orderTaskGeneration");
+   exports.generateOrderTasksOnCreate = generateOrderTasksOnCreate;
+
+3. Deploy functions:
+   firebase deploy --only functions
+
+How to wire up frontend:
+1. Copy:
+   - work-manager/src/utils/orderTaskGenerator.js
+   - work-manager/src/components/OrderTasksPanel.jsx
+
+2. In your OrderDetailPage import:
+   import OrderTasksPanel from "../components/OrderTasksPanel";
+
+3. Render it somewhere below your order header/details:
+   <OrderTasksPanel orderId={id} order={order} />
+
+Notes:
+- The panel expects your OrderDetailPage to already have access to:
+  - id from the route
+  - order from Firestore
+- New orders will generate tasks automatically from the backend trigger
+- Older orders can use the Generate Tasks button in the panel

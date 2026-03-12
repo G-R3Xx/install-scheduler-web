@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "install-scheduler"
-  }
+  },
+  "targets": {
+    "install-scheduler": {
+      "hosting": {
+        "work-manager": [
+          "work-manager"
+        ],
+        "installs": [
+          "install-scheduler"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }

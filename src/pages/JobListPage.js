@@ -20,7 +20,7 @@ import { db } from "../firebase/firebase";
 import { useAuth } from "../contexts/AuthContext";
 import useActiveTimers from "../hooks/useActiveTimers";
 
-const APP_VERSION = "InstallScheduler v26.02.12.01";
+const APP_VERSION = "InstallScheduler v26.03.05.02";
 
 function IconBadge({ icon, label, bg = "#1976d2" }) {
   return (
